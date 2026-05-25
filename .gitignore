@@ -1,0 +1,28 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Generated outputs
+skymap.html
+skymap.png
+masks/*.json
+
+# Test/scratch files
+test_seestar_conn.py
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+
+# Don't commit device dumps (may contain WiFi creds)
+device_state_*.json
