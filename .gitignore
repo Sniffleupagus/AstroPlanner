@@ -8,6 +8,7 @@ build/
 venv/
 
 # Generated outputs
+cache/
 skymap.html
 skymap.png
 masks/*.json

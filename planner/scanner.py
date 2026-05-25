@@ -1,11 +1,18 @@
 """Scan astrophotography RAID directories for capture metadata."""
 
+from __future__ import annotations
+
 import json
 import glob
 import os
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
+from typing import TYPE_CHECKING
+
 from astropy.io import fits
+
+if TYPE_CHECKING:
+    from planner.capture_cache import CaptureCache
 
 
 @dataclass
@@ -76,13 +83,20 @@ def _dedup_seestar_stacks(records: list[tuple[str, CaptureRecord]]) -> list[Capt
     return deduped
 
 
-def scan_seestar_stacks(base_path: str) -> list[CaptureRecord]:
+def scan_seestar_stacks(base_path: str, cache: CaptureCache | None = None) -> list[CaptureRecord]:
     raw_records: list[tuple[str, CaptureRecord]] = []
     stack_files = glob.glob(os.path.join(base_path, "*/Stacked_*.fit")) + \
                   glob.glob(os.path.join(base_path, "*/DSO_Stacked_*.fit"))
 
     for fpath in stack_files:
         try:
+            if cache is not None:
+                st = os.stat(fpath)
+                cached = cache.lookup(fpath, st.st_mtime, st.st_size)
+                if cached is not None:
+                    raw_records.append((fpath, cached))
+                    continue
+
             with fits.open(fpath) as hdul:
                 h = hdul[0].header
                 ra = h.get("RA")
@@ -94,7 +108,7 @@ def scan_seestar_stacks(base_path: str) -> list[CaptureRecord]:
                 exp_per_frame = h.get("EXPTIME", h.get("EXPOSURE", 0))
                 total_exp = h.get("TOTALEXP", stack_count * exp_per_frame)
 
-                raw_records.append((fpath, CaptureRecord(
+                rec = CaptureRecord(
                     scope="Seestar S50",
                     target=h.get("OBJECT", "Unknown"),
                     ra_deg=float(ra),
@@ -107,7 +121,10 @@ def scan_seestar_stacks(base_path: str) -> list[CaptureRecord]:
                     date_obs=h.get("DATE-OBS", ""),
                     directory=str(Path(fpath).parent),
                     is_mosaic="_mosaic" in Path(fpath).parent.name,
-                )))
+                )
+                if cache is not None:
+                    cache.store(fpath, st.st_mtime, st.st_size, rec)
+                raw_records.append((fpath, rec))
         except Exception as e:
             print(f"  WARN: {fpath}: {e}")
 
@@ -115,7 +132,7 @@ def scan_seestar_stacks(base_path: str) -> list[CaptureRecord]:
     return _dedup_seestar_stacks(raw_records)
 
 
-def scan_dwarf_sessions(base_path: str, scope_name: str) -> list[CaptureRecord]:
+def scan_dwarf_sessions(base_path: str, scope_name: str, cache: CaptureCache | None = None) -> list[CaptureRecord]:
     records = []
     astro_dir = os.path.join(base_path, "Astronomy")
     if not os.path.isdir(astro_dir):
@@ -131,21 +148,27 @@ def scan_dwarf_sessions(base_path: str, scope_name: str) -> list[CaptureRecord]:
         is_mosaic = "_MOSAIC_" in entry
 
         if is_mosaic:
-            records.extend(_scan_dwarf_mosaic(entry_path, scope_name))
+            records.extend(_scan_dwarf_mosaic(entry_path, scope_name, cache))
         else:
-            rec = _scan_dwarf_single(entry_path, scope_name)
+            rec = _scan_dwarf_single(entry_path, scope_name, cache)
             if rec:
                 records.append(rec)
 
     return records
 
 
-def _scan_dwarf_single(session_dir: str, scope_name: str) -> CaptureRecord | None:
+def _scan_dwarf_single(session_dir: str, scope_name: str, cache: CaptureCache | None = None) -> CaptureRecord | None:
     json_path = os.path.join(session_dir, "shotsInfo.json")
     if not os.path.exists(json_path):
         return None
 
     try:
+        if cache is not None:
+            st = os.stat(json_path)
+            cached = cache.lookup(json_path, st.st_mtime, st.st_size)
+            if cached is not None:
+                return cached
+
         with open(json_path) as f:
             info = json.load(f)
 
@@ -159,7 +182,7 @@ def _scan_dwarf_single(session_dir: str, scope_name: str) -> CaptureRecord | Non
         shots_taken = int(info.get("shotsTaken", 0))
         total_exp = exp_per_frame * shots_taken
 
-        return CaptureRecord(
+        rec = CaptureRecord(
             scope=scope_name,
             target=info.get("target", "Unknown"),
             ra_deg=ra_deg,
@@ -173,12 +196,15 @@ def _scan_dwarf_single(session_dir: str, scope_name: str) -> CaptureRecord | Non
             directory=session_dir,
             is_mosaic=False,
         )
+        if cache is not None:
+            cache.store(json_path, st.st_mtime, st.st_size, rec)
+        return rec
     except Exception as e:
         print(f"  WARN: {session_dir}: {e}")
         return None
 
 
-def _scan_dwarf_mosaic(mosaic_dir: str, scope_name: str) -> list[CaptureRecord]:
+def _scan_dwarf_mosaic(mosaic_dir: str, scope_name: str, cache: CaptureCache | None = None) -> list[CaptureRecord]:
     """For Dwarf mosaics, read the top-level shotsInfo.json.
 
     The panels share a single RA/DEC in shotsInfo (the mosaic center).
@@ -190,6 +216,12 @@ def _scan_dwarf_mosaic(mosaic_dir: str, scope_name: str) -> list[CaptureRecord]:
         return []
 
     try:
+        if cache is not None:
+            st = os.stat(json_path)
+            cached = cache.lookup(json_path, st.st_mtime, st.st_size)
+            if cached is not None:
+                return [cached]
+
         with open(json_path) as f:
             info = json.load(f)
 
@@ -203,7 +235,7 @@ def _scan_dwarf_mosaic(mosaic_dir: str, scope_name: str) -> list[CaptureRecord]:
         shots_taken = int(info.get("shotsTaken", 0))
         total_exp = exp_per_frame * shots_taken
 
-        return [CaptureRecord(
+        rec = CaptureRecord(
             scope=scope_name,
             target=info.get("target", "Unknown"),
             ra_deg=ra_deg,
@@ -216,27 +248,31 @@ def _scan_dwarf_mosaic(mosaic_dir: str, scope_name: str) -> list[CaptureRecord]:
             date_obs=Path(mosaic_dir).name.split("_")[-1],
             directory=mosaic_dir,
             is_mosaic=True,
-        )]
+        )
+        if cache is not None:
+            cache.store(json_path, st.st_mtime, st.st_size, rec)
+        return [rec]
     except Exception as e:
         print(f"  WARN: {mosaic_dir}: {e}")
         return []
 
 
-def scan_all(raid_base: str = "/mnt/zarchive/Pictures/Astrophotography") -> list[CaptureRecord]:
+def scan_all(raid_base: str = "/mnt/zarchive/Pictures/Astrophotography",
+             cache: CaptureCache | None = None) -> list[CaptureRecord]:
     records = []
 
     print("Scanning Seestar stacks...")
-    seestar = scan_seestar_stacks(os.path.join(raid_base, "Seestar"))
+    seestar = scan_seestar_stacks(os.path.join(raid_base, "Seestar"), cache)
     print(f"  Found {len(seestar)} stacked captures")
     records.extend(seestar)
 
     print("Scanning Dwarf3 sessions...")
-    dwarf3 = scan_dwarf_sessions(os.path.join(raid_base, "Dwarf3"), "Dwarf 3")
+    dwarf3 = scan_dwarf_sessions(os.path.join(raid_base, "Dwarf3"), "Dwarf 3", cache)
     print(f"  Found {len(dwarf3)} sessions")
     records.extend(dwarf3)
 
     print("Scanning Dwarf-mini sessions...")
-    mini = scan_dwarf_sessions(os.path.join(raid_base, "Dwarf-mini"), "Dwarf mini")
+    mini = scan_dwarf_sessions(os.path.join(raid_base, "Dwarf-mini"), "Dwarf mini", cache)
     print(f"  Found {len(mini)} sessions")
     records.extend(mini)
 
