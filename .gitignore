@@ -13,8 +13,14 @@ skymap.html
 skymap.png
 masks/*.json
 
+# Session notes and handoff docs — working scratchpads, not repo artifacts
+HANDOFF.md
+ASTRO_PLANNER_HANDOFF.md
+planner/NOTES.md
+
 # Test/scratch files
 test_seestar_conn.py
+test_live_frame.py
 
 # Editor/IDE
 .vscode/
