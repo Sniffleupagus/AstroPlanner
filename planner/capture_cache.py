@@ -79,6 +79,10 @@ class CaptureCache:
             (file_path, mtime, size, json.dumps(asdict(record))),
         )
 
+    def load_all(self) -> list[CaptureRecord]:
+        rows = self._conn.execute("SELECT record_json FROM captures").fetchall()
+        return [CaptureRecord(**json.loads(r["record_json"])) for r in rows]
+
     def all_paths(self) -> set[str]:
         rows = self._conn.execute("SELECT file_path FROM captures").fetchall()
         return {r["file_path"] for r in rows}

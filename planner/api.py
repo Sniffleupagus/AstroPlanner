@@ -26,12 +26,12 @@ app = FastAPI(title="AstroPlanner", version="0.1.0")
 
 def _load_captures() -> list[dict]:
     db = find_db(_ARCHIVE)
-    cache = CaptureCache(db, read_only=True) if db else None
-    try:
-        records = scan_all(_ARCHIVE, cache)
-    finally:
-        if cache:
-            cache.close()
+    if db:
+        cache = CaptureCache(db, read_only=True)
+        records = cache.load_all()
+        cache.close()
+    else:
+        records = scan_all(_ARCHIVE)
     return [asdict(r) for r in records]
 
 
