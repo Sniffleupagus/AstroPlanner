@@ -5,7 +5,6 @@ at each azimuth, producing a horizon mask for the AstroPlanner recommender.
 """
 
 import json
-import socket
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,14 +20,12 @@ from .sky_detect import classify_frame
 
 DEFAULT_HOST = "10.4.14.165"
 DEFAULT_PORT = 4700
-STREAM_PORT = 4800
-
 # Legacy alias
 SeestarConnection = None  # removed; use SeestarScope
 
 SETTLE_THRESHOLD_ALT = 0.5  # degrees
-SETTLE_THRESHOLD_AZ = 3.0   # degrees — looser for sidereal tracking drift
-SLEW_POLL_INTERVAL = 2.0
+SETTLE_THRESHOLD_AZ = 4.2   # degrees — looser for sidereal tracking drift
+SLEW_POLL_INTERVAL = 4.0
 SLEW_STALL_TIMEOUT = 20.0  # give up only if no progress for this long
 
 
@@ -177,16 +174,19 @@ def altaz_to_radec(alt_deg, az_deg, location, obstime):
     return icrs.ra.hour, icrs.dec.deg
 
 
-def wait_for_slew(scope, target_az, target_alt):
+def wait_for_slew(scope, target_az, target_alt,
+                  thresh_alt=SETTLE_THRESHOLD_ALT,
+                  thresh_az=SETTLE_THRESHOLD_AZ):
     """Poll until the scope settles near the target position.
 
     Checks both altitude AND azimuth convergence. Keeps waiting as long
-    as the scope is making progress. Only times out if the scope stalls
-    for SLEW_STALL_TIMEOUT seconds with no improvement.
+    as the scope is making progress OR still physically moving. Only
+    times out if the scope has truly stopped moving with no improvement.
     """
     started = time.time()
     best_dist = 999.0
     last_progress_time = time.time()
+    prev_alt, prev_az = None, None
 
     while True:
         time.sleep(SLEW_POLL_INTERVAL)
@@ -201,7 +201,7 @@ def wait_for_slew(scope, target_az, target_alt):
         daz = min(abs(az - target_az), 360 - abs(az - target_az))
         elapsed = time.time() - started
 
-        if dalt < SETTLE_THRESHOLD_ALT and daz < SETTLE_THRESHOLD_AZ:
+        if dalt < thresh_alt and daz < thresh_az:
             time.sleep(1)  # let vibrations settle
             print(f"        Scope arrived: Alt {alt:.1f}° Az {az:.0f}° "
                   f"({_fmt_elapsed(elapsed)} slew)")
@@ -213,11 +213,18 @@ def wait_for_slew(scope, target_az, target_alt):
             best_dist = dist
             last_progress_time = time.time()
 
+        # Also reset stall timer if the scope is still physically moving
+        if prev_alt is not None:
+            moved_alt = abs(alt - prev_alt)
+            moved_az = min(abs(az - prev_az), 360 - abs(az - prev_az))
+            if moved_alt > 0.3 or moved_az > 0.3:
+                last_progress_time = time.time()
+        prev_alt, prev_az = alt, az
+
         stall_time = time.time() - last_progress_time
         if stall_time > SLEW_STALL_TIMEOUT:
             print(f"        Slew stalled at Alt {alt:.1f}° Az {az:.0f}° "
-                  f"(no progress for {SLEW_STALL_TIMEOUT:.0f}s, "
-                  f"off by Alt {dalt:.1f}° Az {daz:.0f}°)")
+                  f"(settled, off by Alt {dalt:.1f}° Az {daz:.0f}°)")
             return False
 
         print(f"        Slewing... Alt {alt:.1f}° Az {az:.0f}° "
@@ -225,121 +232,79 @@ def wait_for_slew(scope, target_az, target_alt):
               f"{_fmt_elapsed(elapsed)} elapsed)")
 
 
-_last_image_id = 0
-_last_frame_checksum = None
-
-
 def capture_frame(host=DEFAULT_HOST, wait_for_new=False, timeout=15.0,
                    verbose=True):
     """Capture a single frame and return as numpy array.
 
-    Keeps a persistent connection to the stream port and reads frames
-    until a fresh one arrives (different content from the last capture).
+    Uses seestarpy's get_live_image for reliable frame acquisition with
+    proper ack-frame skipping.  If wait_for_new is True, retries up to
+    timeout seconds until the frame content changes.
 
     Returns (H, W, 3) uint16 if debayered, or (H, W) uint16 for raw Bayer.
     """
-    global _last_image_id, _last_frame_checksum
-    from seestarpy.stream import parse_header, _decompress_payload, _ZIP_LOCAL_SIG
+    from seestarpy.stream import (
+        get_live_image, decode_payload, _decompress_payload, _ZIP_LOCAL_SIG,
+    )
 
-    deadline = time.time() + timeout
-    if verbose:
-        print(f"        📷 Requesting frame from camera...", flush=True)
     cap_start = time.time()
-    frame_count = 0
+    deadline = cap_start + timeout
+    prev_checksum = None
+    attempts = 0
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(10)
-    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-    sock.connect((host, STREAM_PORT))
-    sock.settimeout(timeout)
+    while True:
+        if verbose and attempts == 0:
+            print(f"        📷 Requesting frame from camera...", flush=True)
 
-    def _recv_exact(n):
-        buf = b""
-        while len(buf) < n:
-            chunk = sock.recv(min(n - len(buf), 65536))
-            if not chunk:
-                raise ConnectionError("stream socket closed")
-            buf += chunk
-        return buf
-
-    try:
-        msg = json.dumps({"id": 2, "method": "get_current_img"}) + "\r\n"
-        sock.sendall(msg.encode())
-
-        while time.time() < deadline:
-            # Sync to frame magic 0x03C3
-            while True:
-                b = _recv_exact(1)
-                if b[0] == 0x03:
-                    b2 = _recv_exact(1)
-                    if b2[0] == 0xC3:
-                        break
-                elif b[0] == ord("{"):
-                    line = b
-                    while not line.endswith(b"\r\n"):
-                        line += _recv_exact(1)
-
-            rest = _recv_exact(32)
-            header = parse_header(b"\x03\xC3" + rest)
-            payload = _recv_exact(header["length"])
-            frame_count += 1
-
-            _last_image_id = header.get("image_id", 0)
-            w = header.get("width", 0)
-            h = header.get("height", 0)
-
-            # Content-based freshness check
-            is_saturated = len(payload) < 50 * 1024
-            if wait_for_new and _last_frame_checksum is not None and not is_saturated:
-                checksum = (len(payload), payload[:1024], payload[-1024:])
-                if checksum == _last_frame_checksum:
-                    if frame_count <= 10:
-                        if frame_count % 3 == 0:
-                            print(f"        📷 Waiting for fresh frame... "
-                                  f"(frame {frame_count} still stale)", flush=True)
-                        continue
-                    else:
-                        print(f"        📷 ⚠ Frame unchanged after {frame_count} frames — "
-                              f"using it anyway.")
-
-            # Save checksum for next comparison (only for non-saturated)
-            if not is_saturated:
-                _last_frame_checksum = (len(payload), payload[:1024], payload[-1024:])
-            else:
-                _last_frame_checksum = None
-
-            cap_elapsed = time.time() - cap_start
-
+        per_call_timeout = min(10.0, max(2.0, deadline - time.time()))
+        header, payload = get_live_image(
+            ip=host, method="get_current_img",
+            fallback=False, read_timeout=per_call_timeout,
+        )
+        try:
+            pixels = decode_payload(payload, header)
+        except ValueError:
+            # decode_payload assumes ZIP = RGB, but get_current_img can
+            # return ZIP-compressed Bayer.  Fall back to manual decode.
+            w = header['width']
+            h = header['height']
             if _ZIP_LOCAL_SIG in payload:
                 raw = _decompress_payload(payload)
-                if len(raw) == h * w * 3 * 2:
-                    if verbose:
-                        print(f"        📷 Frame received: {w}x{h} RGB, "
-                              f"{len(payload)/1024:.0f}KB compressed ({cap_elapsed:.1f}s)")
-                    return np.frombuffer(raw, dtype=np.uint16).reshape(h, w, 3)
-                elif len(raw) == h * w * 2:
-                    if verbose:
-                        print(f"        📷 Frame received: {w}x{h} Bayer, "
-                              f"{len(payload)/1024:.0f}KB compressed ({cap_elapsed:.1f}s)")
-                    return np.frombuffer(raw, dtype=np.uint16).reshape(h, w)
+                if len(raw) == h * w * 2:
+                    pixels = np.frombuffer(raw, dtype=np.uint16).reshape(h, w)
+                else:
+                    raise
+            else:
+                raise
+        attempts += 1
+        elapsed = time.time() - cap_start
 
-            if len(payload) == h * w * 2:
-                if verbose:
-                    print(f"        📷 Frame received: {w}x{h} raw, "
-                          f"{len(payload)/1024:.0f}KB ({cap_elapsed:.1f}s)")
-                return np.frombuffer(payload, dtype=np.uint16).reshape(h, w)
+        if not wait_for_new:
+            if verbose:
+                w, h = header['width'], header['height']
+                print(f"        📷 Frame received: {w}x{h}, "
+                      f"{len(payload)/1024:.0f}KB ({elapsed:.1f}s)")
+            return pixels
 
-            raise RuntimeError(
-                f"Cannot decode frame: {len(payload)} bytes, {w}x{h}, "
-                f"ZIP={'yes' if _ZIP_LOCAL_SIG in payload else 'no'}"
-            )
-    except KeyboardInterrupt:
-        raise
-    finally:
-        sock.close()
+        checksum = (len(payload), payload[:1024], payload[-1024:])
+        if prev_checksum is None or checksum != prev_checksum:
+            if verbose:
+                w, h = header['width'], header['height']
+                wait_note = f" (attempt {attempts})" if attempts > 1 else ""
+                print(f"        📷 Fresh frame: {w}x{h}, "
+                      f"{len(payload)/1024:.0f}KB ({elapsed:.1f}s){wait_note}")
+            return pixels
 
-    raise TimeoutError("No new frame received within timeout")
+        prev_checksum = checksum
+        if time.time() >= deadline:
+            if verbose:
+                print(f"        📷 ⚠ Frame unchanged after {attempts} attempts — "
+                      f"using it anyway.")
+            return pixels
+
+        if verbose and attempts % 3 == 0:
+            print(f"        📷 Waiting for fresh frame... "
+                  f"(attempt {attempts}, {elapsed:.1f}s)", flush=True)
+        time.sleep(1)
 
 
 def _log_classify(result, alt, az, context=""):
@@ -403,11 +368,19 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
         scope.goto(ra_h, dec_d, target_alt=alt, target_az=az_deg)
         time.sleep(1)
         if not wait_for_slew(scope, az_deg, alt):
-            print(f"        ⚠ Slew may not have fully settled")
+            print(f"        ⚠ Slew didn't settle — retrying with 2x margin")
+            obstime = Time.now()
+            ra_h, dec_d = altaz_to_radec(alt, az_deg, location, obstime)
+            scope.goto(ra_h, dec_d, target_alt=alt, target_az=az_deg)
+            time.sleep(1)
+            if not wait_for_slew(scope, az_deg, alt,
+                                 thresh_alt=SETTLE_THRESHOLD_ALT * 2,
+                                 thresh_az=SETTLE_THRESHOLD_AZ * 2):
+                print(f"        ⚠ Retry slew still not settled, continuing anyway")
 
         # Capture frames until we get one different from pre-slew
         pixels = None
-        deadline = time.time() + 15.0
+        deadline = time.time() + 45.0
         attempts = 0
         while time.time() < deadline:
             try:
@@ -421,7 +394,7 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
             if ref_hash is None or frame.tobytes()[:4096] != ref_hash:
                 pixels = frame
                 bright = pixels.mean() / (65535.0 if pixels.dtype == np.uint16 else 255.0)
-                sz = "saturated" if bright > 0.95 else f"{len(frame.tobytes())/1024:.0f}KB"
+                sz = "saturated" if bright > 0.65 else f"{len(frame.tobytes())/1024:.0f}KB"
                 wait_note = f" (waited {attempts}s)" if attempts > 1 else ""
                 print(f"        📷 Fresh frame captured ({sz}){wait_note}")
                 break
@@ -498,10 +471,56 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
         return alt_max
 
 
+def _load_existing_boundaries(output_path):
+    """Load boundaries from an existing horizon JSON file.
+
+    Returns dict of {azimuth: raw_altitude} (margin removed) and the
+    margin that was used, or ({}, None) if the file doesn't exist.
+    """
+    path = Path(output_path)
+    if not path.exists():
+        return {}, None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        old_margin = data.get("margin_degrees", 0)
+        boundaries = {}
+        for entry in data.get("boundary", []):
+            raw_alt = entry["min_altitude"] - old_margin
+            boundaries[entry["azimuth"]] = max(raw_alt, 0)
+        return boundaries, old_margin
+    except (json.JSONDecodeError, KeyError):
+        return {}, None
+
+
+def _save_boundaries(boundaries, margin, lat, lon, coarse_step, fine_step,
+                     output_path):
+    """Write the current boundary state to the output JSON."""
+    mask_data = {
+        "location": {"lat": lat, "lon": lon},
+        "generated": datetime.now(timezone.utc).isoformat(),
+        "margin_degrees": margin,
+        "coarse_step": coarse_step,
+        "fine_step": fine_step,
+        "boundary": sorted(
+            [{"azimuth": az, "min_altitude": min(alt + margin, 90.0)}
+             for az, alt in boundaries.items()],
+            key=lambda x: x["azimuth"]
+        ),
+    }
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as f:
+        json.dump(mask_data, f, indent=2)
+    return mask_data
+
+
 def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
                  refine_threshold=5.0, margin=5.0, output_path="masks/horizon.json",
                  alt_min=5.0, alt_max=85.0, start_alt=None,
-                 gain=50, exposure_ms=10):
+                 gain=50, exposure_ms=10,
+                 az_start=None, az_end=None, az_only=None,
+                 coarse_only=False):
     """Run the full multi-pass horizon scan.
 
     Parameters
@@ -530,9 +549,23 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
     exposure_ms : int
         Exposure time in milliseconds (default 10).
         Increase if sky doesn't saturate.
+    az_start : float, optional
+        Starting azimuth for partial scan (degrees, 0-360).
+    az_end : float, optional
+        Ending azimuth for partial scan (degrees, 0-360).
+    az_only : float, optional
+        Single azimuth to scan and update.
+    coarse_only : bool
+        If True, skip the fine refinement pass.
     """
     scan_start = time.time()
     scope = SeestarScope(host)
+
+    # Load any existing boundaries so we can merge incrementally
+    existing_boundaries, _ = _load_existing_boundaries(output_path)
+    if existing_boundaries:
+        print(f"  Loaded {len(existing_boundaries)} existing boundary readings "
+              f"from {output_path}")
 
     print("=" * 60)
     print("  HORIZON SCAN — Finding where sky meets obstructions")
@@ -568,22 +601,42 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
     scope._send("set_setting", {"exp_ms": {"continuous": exposure_ms}})
     time.sleep(1)
     print(f"  Camera: gain={gain}, exposure={exposure_ms}ms")
-    print(f"  Sky detection: saturated (brightness>0.95) = sky, else = obstruction")
+    print(f"  Sky detection: saturated (brightness>0.65) = sky, else = obstruction")
     print(f"  Tip: increase --gain or --exposure if sky doesn't fully saturate")
     print(f"  Preview: watch horizon_scan.jpg for the latest captured frame")
     print()
 
-    # Pass 1: Coarse sweep
-    coarse_azimuths = np.arange(0, 360, coarse_step)
-    boundaries = {}
+    # Start with existing data and merge new readings on top
+    boundaries = dict(existing_boundaries)
     prev_boundary = start_alt
 
+    # Build azimuth list based on mode
+    if az_only is not None:
+        coarse_azimuths = np.array([az_only])
+        print(f"  Mode: single azimuth {az_only:.0f}° ({_compass(az_only)})")
+    else:
+        coarse_azimuths = np.arange(0, 360, coarse_step)
+        if az_start is not None or az_end is not None:
+            az_s = az_start if az_start is not None else 0.0
+            az_e = az_end if az_end is not None else 360.0
+            if az_s <= az_e:
+                coarse_azimuths = coarse_azimuths[
+                    (coarse_azimuths >= az_s) & (coarse_azimuths <= az_e)]
+            else:
+                # Wraps around 0, e.g. 300 to 60
+                coarse_azimuths = coarse_azimuths[
+                    (coarse_azimuths >= az_s) | (coarse_azimuths <= az_e)]
+            print(f"  Mode: partial scan Az {az_s:.0f}°–{az_e:.0f}°")
+
+    # Pass 1: Coarse sweep
     print("=" * 60)
     print(f"  PASS 1: Coarse sweep — {len(coarse_azimuths)} directions, "
           f"every {coarse_step:.0f}°")
     print(f"  Searching altitudes {alt_min:.0f}° to {alt_max:.0f}° at each direction")
     if start_alt is not None:
         print(f"  Starting first azimuth at {start_alt:.0f}° (--start-alt)")
+    if coarse_only:
+        print(f"  Coarse only — fine refinement pass disabled")
     print("=" * 60)
     print()
 
@@ -600,6 +653,11 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
         boundaries[az] = boundary
         prev_boundary = boundary
         print(f"    ✓ Horizon at {az:.0f}° ({direction}): sky visible above {boundary:.1f}°")
+
+        # Live update — write after every azimuth
+        _save_boundaries(boundaries, margin, lat, lon, coarse_step,
+                         fine_step, output_path)
+        print(f"    💾 {output_path} updated ({len(boundaries)} azimuths)")
         print()
 
     pass1_elapsed = time.time() - pass1_start
@@ -611,76 +669,70 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
     print()
 
     # Pass 2: Fill in at fine_step where neighbors disagree
-    coarse_sorted = sorted(boundaries.keys())
-    fine_azimuths = []
-    refine_regions = []
-    for i in range(len(coarse_sorted)):
-        az1 = coarse_sorted[i]
-        az2 = coarse_sorted[(i + 1) % len(coarse_sorted)]
-        diff = abs(boundaries[az1] - boundaries[az2])
-        if diff > refine_threshold:
-            refine_regions.append((az1, az2, diff))
-            step = fine_step
-            if az2 > az1:
-                fill = np.arange(az1 + step, az2, step)
-            else:
-                fill = np.arange(az1 + step, az1 + (360 - az1 + az2), step) % 360
-            for az in fill:
-                if az not in boundaries:
-                    fine_azimuths.append(az)
-
-    if fine_azimuths:
-        fine_azimuths.sort()
-        print("=" * 60)
-        print(f"  PASS 2: Refining — {len(fine_azimuths)} extra directions")
-        print(f"  (filling in where adjacent readings differ by >{refine_threshold}°)")
-        print("=" * 60)
-        for az1, az2, diff in refine_regions:
-            print(f"    {az1:.0f}° ({_compass(az1)}) → {az2:.0f}° ({_compass(az2)}): "
-                  f"boundary jumps {diff:.1f}°, needs detail")
-        print()
-
-        pass2_start = time.time()
-        for i, az in enumerate(fine_azimuths):
-            obstime = Time.now()
-            direction = _compass(az)
-            nearest_coarse = min(coarse_sorted, key=lambda c: min(abs(c - az), 360 - abs(c - az)))
-            hint = boundaries[nearest_coarse]
-            print(f"  [{i+1}/{len(fine_azimuths)}] Azimuth {az:.1f}° ({direction})")
-            boundary = find_boundary(scope, az, location, obstime, host,
-                                     alt_min, alt_max,
-                                     start_alt=hint)
-            boundaries[az] = boundary
-            print(f"    ✓ Horizon at {az:.1f}° ({direction}): sky visible above {boundary:.1f}°")
-            print()
-        print(f"  Pass 2 complete in {_fmt_elapsed(time.time() - pass2_start)}")
+    if coarse_only or az_only is not None:
+        if coarse_only:
+            print("  Pass 2: Skipped (--coarse-only)")
+        else:
+            print("  Pass 2: Skipped (single azimuth mode)")
     else:
-        print("  Pass 2: Skipped (horizon is smooth between all coarse samples)")
+        coarse_sorted = sorted(boundaries.keys())
+        fine_azimuths = []
+        refine_regions = []
+        for i in range(len(coarse_sorted)):
+            az1 = coarse_sorted[i]
+            az2 = coarse_sorted[(i + 1) % len(coarse_sorted)]
+            diff = abs(boundaries[az1] - boundaries[az2])
+            if diff > refine_threshold:
+                refine_regions.append((az1, az2, diff))
+                step = fine_step
+                if az2 > az1:
+                    fill = np.arange(az1 + step, az2, step)
+                else:
+                    fill = np.arange(az1 + step, az1 + (360 - az1 + az2), step) % 360
+                for az in fill:
+                    if az not in boundaries:
+                        fine_azimuths.append(az)
+
+        if fine_azimuths:
+            fine_azimuths.sort()
+            print("=" * 60)
+            print(f"  PASS 2: Refining — {len(fine_azimuths)} extra directions")
+            print(f"  (filling in where adjacent readings differ by >{refine_threshold}°)")
+            print("=" * 60)
+            for az1, az2, diff in refine_regions:
+                print(f"    {az1:.0f}° ({_compass(az1)}) → {az2:.0f}° ({_compass(az2)}): "
+                      f"boundary jumps {diff:.1f}°, needs detail")
+            print()
+
+            pass2_start = time.time()
+            for i, az in enumerate(fine_azimuths):
+                obstime = Time.now()
+                direction = _compass(az)
+                nearest_coarse = min(coarse_sorted, key=lambda c: min(abs(c - az), 360 - abs(c - az)))
+                hint = boundaries[nearest_coarse]
+                print(f"  [{i+1}/{len(fine_azimuths)}] Azimuth {az:.1f}° ({direction})")
+                boundary = find_boundary(scope, az, location, obstime, host,
+                                         alt_min, alt_max,
+                                         start_alt=hint)
+                boundaries[az] = boundary
+                print(f"    ✓ Horizon at {az:.1f}° ({direction}): sky visible above {boundary:.1f}°")
+
+                _save_boundaries(boundaries, margin, lat, lon, coarse_step,
+                                 fine_step, output_path)
+                print(f"    💾 {output_path} updated ({len(boundaries)} azimuths)")
+                print()
+            print(f"  Pass 2 complete in {_fmt_elapsed(time.time() - pass2_start)}")
+        else:
+            print("  Pass 2: Skipped (horizon is smooth between all coarse samples)")
     print()
 
     # Stop view session
     print("Shutting down camera session...")
     scope.stop_view()
 
-    # Build output with margin
-    mask_data = {
-        "location": {"lat": lat, "lon": lon},
-        "generated": datetime.now(timezone.utc).isoformat(),
-        "margin_degrees": margin,
-        "coarse_step": coarse_step,
-        "fine_step": fine_step,
-        "boundary": sorted(
-            [{"azimuth": az, "min_altitude": min(alt + margin, 90.0)}
-             for az, alt in boundaries.items()],
-            key=lambda x: x["azimuth"]
-        ),
-    }
-
-    # Write output
-    out_path = Path(output_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w") as f:
-        json.dump(mask_data, f, indent=2)
+    # Final save
+    mask_data = _save_boundaries(boundaries, margin, lat, lon, coarse_step,
+                                 fine_step, output_path)
 
     total_elapsed = time.time() - scan_start
     print()
@@ -690,7 +742,7 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
     print(f"  Total time:     {_fmt_elapsed(total_elapsed)}")
     print(f"  Directions:     {len(boundaries)} azimuths sampled")
     print(f"  Safety margin:  +{margin}° added to all boundaries")
-    print(f"  Output:         {out_path}")
+    print(f"  Output:         {output_path}")
     print()
     print("  Horizon summary (with margin applied):")
     sorted_b = sorted(boundaries.items())
