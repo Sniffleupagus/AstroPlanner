@@ -24,19 +24,23 @@ def main():
     parser.add_argument("--lon", type=float, help="Observer longitude (degrees)")
     parser.add_argument("--archive", default=_DEFAULT_ARCHIVE,
                         help="Astrophotography archive base path")
+    parser.add_argument("--regenerate-cache", action="store_true",
+                        help="Ignore cache and rescan all files from the archive")
     args = parser.parse_args()
 
     db_path = find_db(args.archive)
-    cache = None
-    if db_path:
-        print(f"Using cache: {db_path}")
+    if db_path and not args.regenerate_cache:
+        print(f"Loading from cache: {db_path}")
         cache = CaptureCache(db_path, read_only=True)
-    else:
-        print("No cache found — scanning all files (run update_cache.py to build one)")
-
-    records = scan_all(args.archive, cache)
-    if cache:
+        records = cache.load_all()
         cache.close()
+        print(f"Loaded {len(records)} capture records")
+    else:
+        if args.regenerate_cache:
+            print("Regenerating: scanning all files...")
+        else:
+            print("No cache found — scanning all files (run update_cache.py to build one)")
+        records = scan_all(args.archive)
     print_summary(records)
 
     mask_path = args.mask if os.path.exists(args.mask) else None
