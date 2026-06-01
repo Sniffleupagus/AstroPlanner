@@ -29,6 +29,16 @@ def main():
                         help="Minimum altitude to search (default: 5)")
     parser.add_argument("--alt-max", type=float, default=85.0,
                         help="Maximum altitude to search (default: 85)")
+    parser.add_argument("--start-alt", type=float, default=None,
+                        help="Starting altitude hint for first azimuth (default: alt-min). "
+                             "Use this if you know your horizon is above a certain altitude "
+                             "to skip scanning low obstructions you can already see.")
+    parser.add_argument("--gain", type=int, default=50,
+                        help="Sensor gain (default: 50). Lower = more dynamic range. "
+                             "Increase for overcast until sky saturates.")
+    parser.add_argument("--exposure", type=int, default=10,
+                        help="Exposure in ms (default: 10). "
+                             "Increase for overcast/dim conditions until sky saturates.")
     parser.add_argument("--refine-threshold", type=float, default=5.0,
                         help="Altitude difference threshold to trigger fine pass (default: 5)")
 
@@ -43,6 +53,9 @@ def main():
         output_path=args.output,
         alt_min=args.alt_min,
         alt_max=args.alt_max,
+        start_alt=args.start_alt,
+        gain=args.gain,
+        exposure_ms=args.exposure,
     )
 
     from planner.horizon_mask import HorizonMask
