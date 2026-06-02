@@ -416,7 +416,7 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
 
             # Camera stuck — reduce gain, re-slew, try again
             if gain is not None and gain > 10:
-                gain -= 10
+                #gain -= 10
                 print(f"\n        ⚠ Camera stuck (no new frame) — "
                       f"reducing gain to {gain}, re-slewing")
                 scope._send("set_control_value", ["gain", gain])
@@ -444,18 +444,20 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
         wait_note = f" (attempt {fetch_attempts})" if fetch_attempts > 1 else ""
         print(f"        📷 Fresh frame captured (mean={bright:.2f}){wait_note}")
 
-        # If fully saturated (mean exactly 1.0), preemptively reduce gain
-        # for the next capture — camera will likely get stuck otherwise.
-        if bright == 1.0 and gain is not None and gain > 10:
-            gain -= 10
-            print(f"        💡 Fully saturated — reducing gain to {gain} "
-                  f"for next capture")
-            scope._send("set_control_value", ["gain", gain])
-
         result = classify_frame(pixels, sky_bright=sky_bright,
                                    sky_fraction=sky_fraction)
         _save_preview(pixels)
         _log_classify(result, alt, az_deg, label)
+
+        # If nearly saturated and uniformly bright, preemptively reduce gain
+        # for the next capture — camera will likely get stuck otherwise.
+        if (bright > 0.95 and result.get("bright_fraction", 0) >= 1.0
+                and gain is not None and gain > 10):
+            gain -= 10
+            print(f"        💡 Nearly saturated — reducing gain to {gain} "
+                  f"for next capture")
+            scope._send("set_control_value", ["gain", gain])
+
         return result
 
     result = _check_alt(current, "start")
@@ -519,7 +521,7 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
             return boundary, gain
 
         # Too dark — increase gain and retry from the top down
-        while gain is not None and gain < 80:
+        while gain is not None and gain < 220:
             gain += 10
             print(f"      → ⚠ No sky found up to {alt_max:.1f}° — "
                   f"too dark? Increasing gain to {gain}, retrying from top")
