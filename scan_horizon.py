@@ -51,10 +51,16 @@ def main():
                         help="Single azimuth to scan and update (degrees)")
     parser.add_argument("--coarse-only", action="store_true",
                         help="Skip the fine refinement pass")
+    parser.add_argument("--sky-bright", type=float, default=None,
+                        help="Per-pixel brightness floor for 'bright' classification "
+                             "(0-1, default: 0.8). Lower at dusk/dawn.")
+    parser.add_argument("--sky-fraction", type=float, default=None,
+                        help="Fraction of pixels that must be bright to classify as sky "
+                             "(0-1, default: 0.95). Lower to tolerate minor obstructions.")
 
     args = parser.parse_args()
 
-    mask = scan_horizon(
+    kwargs = dict(
         host=args.host,
         coarse_step=args.coarse,
         fine_step=args.fine,
@@ -71,6 +77,11 @@ def main():
         az_only=args.az,
         coarse_only=args.coarse_only,
     )
+    if args.sky_bright is not None:
+        kwargs["sky_bright"] = args.sky_bright
+    if args.sky_fraction is not None:
+        kwargs["sky_fraction"] = args.sky_fraction
+    mask = scan_horizon(**kwargs)
 
     from planner.horizon_mask import HorizonMask
     hm = HorizonMask(mask["boundary"], mask["margin_degrees"])

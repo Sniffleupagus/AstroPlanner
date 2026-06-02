@@ -15,7 +15,7 @@ from astropy.coordinates import EarthLocation, AltAz, SkyCoord
 from astropy.time import Time
 import astropy.units as u
 
-from .sky_detect import classify_frame
+from .sky_detect import classify_frame, debayer, DEFAULT_SKY_BRIGHT, DEFAULT_SKY_FRACTION
 
 
 DEFAULT_HOST = "10.4.14.165"
@@ -240,7 +240,7 @@ def capture_frame(host=DEFAULT_HOST, wait_for_new=False, timeout=15.0,
     proper ack-frame skipping.  If wait_for_new is True, retries up to
     timeout seconds until the frame content changes.
 
-    Returns (H, W, 3) uint16 if debayered, or (H, W) uint16 for raw Bayer.
+    Returns (H, W, 3) uint16 RGB (Bayer frames are demosaiced automatically).
     """
     from seestarpy.stream import (
         get_live_image, decode_payload, _decompress_payload, _ZIP_LOCAL_SIG,
@@ -275,6 +275,7 @@ def capture_frame(host=DEFAULT_HOST, wait_for_new=False, timeout=15.0,
                     raise
             else:
                 raise
+        pixels = debayer(pixels)
         attempts += 1
         elapsed = time.time() - cap_start
 
@@ -311,15 +312,19 @@ def _log_classify(result, alt, az, context=""):
     """Print a human-readable summary of a frame classification."""
     is_sky = result.get("is_sky")
     bright = result.get("brightness", 0)
+    bright_frac = result.get("bright_fraction", 0)
+    dark_frac = result.get("dark_fraction", 0)
     verdict = "SKY ☀" if is_sky else "OBSTRUCTION ■"
-    sat = " (saturated)" if is_sky else ""
     ctx = f" {context}" if context else ""
-    print(f"        Frame{ctx} → {verdict}  brightness={bright:.2f}{sat}")
+    print(f"        Frame{ctx} → {verdict}  "
+          f"mean={bright:.2f}  bright={bright_frac:.1%}  dark={dark_frac:.1%}")
 
 
 def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
                   alt_min=5.0, alt_max=85.0, step_size=3.0,
-                  start_alt=None, confirm_count=2):
+                  start_alt=None, confirm_count=2,
+                  sky_bright=DEFAULT_SKY_BRIGHT,
+                  sky_fraction=DEFAULT_SKY_FRACTION):
     """Find the sky/obstruction boundary by stepping up from a starting altitude.
 
     Uses small incremental steps (no big jumps) to avoid triggering meridian
@@ -343,10 +348,7 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
                 img8 = (pixels / 256).astype(np.uint8)
             else:
                 img8 = pixels
-            if img8.ndim == 2:
-                pil_img = Image.fromarray(img8, mode="L")
-            else:
-                pil_img = Image.fromarray(img8, mode="RGB")
+            pil_img = Image.fromarray(img8, mode="RGB")
             pil_img.save("horizon_scan.jpg", quality=85)
         except Exception:
             pass
@@ -394,7 +396,7 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
             if ref_hash is None or frame.tobytes()[:4096] != ref_hash:
                 pixels = frame
                 bright = pixels.mean() / (65535.0 if pixels.dtype == np.uint16 else 255.0)
-                sz = "saturated" if bright > 0.65 else f"{len(frame.tobytes())/1024:.0f}KB"
+                sz = "saturated" if bright > sky_bright else f"{len(frame.tobytes())/1024:.0f}KB"
                 wait_note = f" (waited {attempts}s)" if attempts > 1 else ""
                 print(f"        📷 Fresh frame captured ({sz}){wait_note}")
                 break
@@ -408,7 +410,8 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
             pixels = frame
 
         if pixels is not None:
-            result = classify_frame(pixels)
+            result = classify_frame(pixels, sky_bright=sky_bright,
+                                       sky_fraction=sky_fraction)
             _save_preview(pixels)
         else:
             print(f"        Frame capture failed, assuming obstruction")
@@ -520,7 +523,9 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
                  alt_min=5.0, alt_max=85.0, start_alt=None,
                  gain=50, exposure_ms=10,
                  az_start=None, az_end=None, az_only=None,
-                 coarse_only=False):
+                 coarse_only=False,
+                 sky_bright=DEFAULT_SKY_BRIGHT,
+                 sky_fraction=DEFAULT_SKY_FRACTION):
     """Run the full multi-pass horizon scan.
 
     Parameters
@@ -601,7 +606,7 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
     scope._send("set_setting", {"exp_ms": {"continuous": exposure_ms}})
     time.sleep(1)
     print(f"  Camera: gain={gain}, exposure={exposure_ms}ms")
-    print(f"  Sky detection: saturated (brightness>0.65) = sky, else = obstruction")
+    print(f"  Sky detection: >{sky_fraction:.0%} of pixels must be brighter than {sky_bright}")
     print(f"  Tip: increase --gain or --exposure if sky doesn't fully saturate")
     print(f"  Preview: watch horizon_scan.jpg for the latest captured frame")
     print()
@@ -649,7 +654,9 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
               f"[elapsed: {elapsed}]")
         boundary = find_boundary(scope, az, location, obstime, host,
                                  alt_min, alt_max,
-                                 start_alt=prev_boundary)
+                                 start_alt=prev_boundary,
+                                 sky_bright=sky_bright,
+                                 sky_fraction=sky_fraction)
         boundaries[az] = boundary
         prev_boundary = boundary
         print(f"    ✓ Horizon at {az:.0f}° ({direction}): sky visible above {boundary:.1f}°")
@@ -713,7 +720,9 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
                 print(f"  [{i+1}/{len(fine_azimuths)}] Azimuth {az:.1f}° ({direction})")
                 boundary = find_boundary(scope, az, location, obstime, host,
                                          alt_min, alt_max,
-                                         start_alt=hint)
+                                         start_alt=hint,
+                                         sky_bright=sky_bright,
+                                         sky_fraction=sky_fraction)
                 boundaries[az] = boundary
                 print(f"    ✓ Horizon at {az:.1f}° ({direction}): sky visible above {boundary:.1f}°")
 

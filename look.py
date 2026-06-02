@@ -22,7 +22,7 @@ from planner.horizon_scan import (
     SeestarScope, altaz_to_radec, capture_frame, wait_for_slew,
     _compass, DEFAULT_HOST,
 )
-from planner.sky_detect import classify_frame
+from planner.sky_detect import classify_frame, DEFAULT_SKY_BRIGHT, DEFAULT_SKY_FRACTION
 
 
 def main():
@@ -39,6 +39,10 @@ def main():
                         help="Exposure in ms (default: 10)")
     parser.add_argument("--host", default=DEFAULT_HOST,
                         help=f"Seestar IP (default: {DEFAULT_HOST})")
+    parser.add_argument("--sky-bright", type=float, default=DEFAULT_SKY_BRIGHT,
+                        help=f"Per-pixel brightness floor (default: {DEFAULT_SKY_BRIGHT})")
+    parser.add_argument("--sky-fraction", type=float, default=DEFAULT_SKY_FRACTION,
+                        help=f"Fraction of pixels that must be bright (default: {DEFAULT_SKY_FRACTION})")
     args = parser.parse_args()
 
     alt, az = args.alt, args.az
@@ -117,17 +121,13 @@ def main():
         scope.stop_view()
         sys.exit(1)
 
-    # Save as JPEG
+    # Save as JPEG (capture_frame already debayers to RGB)
     if pixels.dtype == np.uint16:
         img8 = (pixels / 256).astype(np.uint8)
     else:
         img8 = pixels
 
-    if img8.ndim == 2:
-        # Bayer frame — save as grayscale
-        pil_img = Image.fromarray(img8, mode="L")
-    else:
-        pil_img = Image.fromarray(img8, mode="RGB")
+    pil_img = Image.fromarray(img8, mode="RGB")
 
     pil_img.save(args.output, quality=90)
     import os, hashlib
@@ -138,13 +138,18 @@ def main():
     print()
 
     # Classify
-    result = classify_frame(pixels)
+    result = classify_frame(pixels, sky_bright=args.sky_bright,
+                            sky_fraction=args.sky_fraction)
     brightness = result["brightness"]
+    bright_frac = result["bright_fraction"]
+    dark_frac = result["dark_fraction"]
     is_sky = result["is_sky"]
 
     verdict = "SKY ☀" if is_sky else "OBSTRUCTION ■"
     print(f"Classification: {verdict}")
-    print(f"  brightness = {brightness:.4f}  (threshold: >0.95 = sky)")
+    print(f"  mean brightness = {brightness:.4f}")
+    print(f"  bright pixels   = {bright_frac:.1%}  (need >{args.sky_fraction:.0%} above {args.sky_bright})")
+    print(f"  dark pixels     = {dark_frac:.1%}  (below 0.3)")
     print()
 
     # Extra stats for debugging thresholds
@@ -156,11 +161,9 @@ def main():
     pmin, pmax = norm.min(), norm.max()
     std = norm.std()
     median = np.median(norm)
-    pct_saturated = (norm > 0.95).mean()
 
     print(f"  Pixel stats:")
     print(f"    min={pmin:.4f}  max={pmax:.4f}  median={median:.4f}  std={std:.4f}")
-    print(f"    saturated pixels: {pct_saturated:.1%} (>{0.95:.2f})")
 
     if pixels.ndim == 3 and pixels.shape[2] == 3:
         r = pixels[:, :, 0].mean()
