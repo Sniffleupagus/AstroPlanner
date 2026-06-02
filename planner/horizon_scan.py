@@ -324,14 +324,16 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
                   alt_min=5.0, alt_max=85.0, step_size=3.0,
                   start_alt=None, confirm_count=2,
                   sky_bright=DEFAULT_SKY_BRIGHT,
-                  sky_fraction=DEFAULT_SKY_FRACTION):
+                  sky_fraction=DEFAULT_SKY_FRACTION,
+                  gain=None):
     """Find the sky/obstruction boundary by stepping up from a starting altitude.
 
     Uses small incremental steps (no big jumps) to avoid triggering meridian
     flips in EQ mode. Requires multiple consecutive sky readings to confirm
     the boundary (handles holes in tree canopy).
 
-    Returns the lowest altitude (in degrees) where confirmed sky begins.
+    Returns (boundary_alt, gain) — the lowest altitude where confirmed sky
+    begins, and the (possibly adjusted) gain value.
     """
     # Start at hint or low
     if start_alt is not None:
@@ -354,7 +356,7 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
             pass
 
     def _check_alt(alt, label=""):
-        nonlocal obstime
+        nonlocal obstime, gain
         obstime = Time.now()
         ra_h, dec_d = altaz_to_radec(alt, az_deg, location, obstime)
 
@@ -380,47 +382,87 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
                                  thresh_az=SETTLE_THRESHOLD_AZ * 2):
                 print(f"        ⚠ Retry slew still not settled, continuing anyway")
 
-        # Capture frames until we get one different from pre-slew
+        # Get a fresh frame from this position.
+        # If camera is stuck (no new frame after slew), it's likely overwhelmed
+        # from prior overexposure. Reduce gain, re-slew, retry.
         pixels = None
-        deadline = time.time() + 45.0
-        attempts = 0
-        while time.time() < deadline:
-            try:
-                frame = capture_frame(host, wait_for_new=False, timeout=5,
-                                      verbose=False)
-            except Exception as e:
-                print(f"        Frame grab failed: {e}")
+        max_stuck_retries = 5
+        for stuck_attempt in range(max_stuck_retries):
+            deadline = time.time() + 45.0
+            fetch_attempts = 0
+            got_fresh = False
+            while time.time() < deadline:
+                try:
+                    frame = capture_frame(host, wait_for_new=False, timeout=5,
+                                          verbose=False)
+                except Exception as e:
+                    fetch_attempts += 1
+                    print(f"        Frame grab failed: {e} (retry {fetch_attempts})")
+                    time.sleep(2)
+                    continue
+                fetch_attempts += 1
+                if ref_hash is None or frame.tobytes()[:4096] != ref_hash:
+                    pixels = frame
+                    got_fresh = True
+                    break
+                if fetch_attempts == 1:
+                    print(f"        📷 Waiting for fresh frame...", end="", flush=True)
+                elif fetch_attempts % 5 == 0:
+                    print(f" {fetch_attempts}s...", end="", flush=True)
                 time.sleep(1)
-                continue
-            attempts += 1
-            if ref_hash is None or frame.tobytes()[:4096] != ref_hash:
-                pixels = frame
-                bright = pixels.mean() / (65535.0 if pixels.dtype == np.uint16 else 255.0)
-                sz = "saturated" if bright > sky_bright else f"{len(frame.tobytes())/1024:.0f}KB"
-                wait_note = f" (waited {attempts}s)" if attempts > 1 else ""
-                print(f"        📷 Fresh frame captured ({sz}){wait_note}")
+
+            if got_fresh:
                 break
-            if attempts == 1:
-                print(f"        📷 Waiting for fresh frame...", end="", flush=True)
-            elif attempts % 5 == 0:
-                print(f" {attempts}s...", end="", flush=True)
-            time.sleep(1)
-        else:
-            print(f"        📷 ⚠ Could not get new frame, using latest")
-            pixels = frame
 
-        if pixels is not None:
-            result = classify_frame(pixels, sky_bright=sky_bright,
-                                       sky_fraction=sky_fraction)
-            _save_preview(pixels)
+            # Camera stuck — reduce gain, re-slew, try again
+            if gain is not None and gain > 10:
+                gain -= 10
+                print(f"\n        ⚠ Camera stuck (no new frame) — "
+                      f"reducing gain to {gain}, re-slewing")
+                scope._send("set_control_value", ["gain", gain])
+                time.sleep(3)
+            else:
+                print(f"\n        ⚠ Camera stuck, gain already at minimum — "
+                      f"re-slewing")
+                time.sleep(3)
+            obstime = Time.now()
+            ra_h, dec_d = altaz_to_radec(alt, az_deg, location, obstime)
+            scope.goto(ra_h, dec_d, target_alt=alt, target_az=az_deg)
+            time.sleep(2)
+            wait_for_slew(scope, az_deg, alt)
+            ref_hash = None
         else:
-            print(f"        Frame capture failed, assuming obstruction")
-            result = {"is_sky": False}
+            print(f"        ⚠ Could not get fresh frame after "
+                  f"{max_stuck_retries} retries")
 
+        if pixels is None:
+            print(f"        ⚠ No frame obtained — cannot classify")
+            return {"is_sky": None, "failed": True}
+
+        # Classify the frame
+        bright = pixels.mean() / (65535.0 if pixels.dtype == np.uint16 else 255.0)
+        wait_note = f" (attempt {fetch_attempts})" if fetch_attempts > 1 else ""
+        print(f"        📷 Fresh frame captured (mean={bright:.2f}){wait_note}")
+
+        # If fully saturated (mean exactly 1.0), preemptively reduce gain
+        # for the next capture — camera will likely get stuck otherwise.
+        if bright == 1.0 and gain is not None and gain > 10:
+            gain -= 10
+            print(f"        💡 Fully saturated — reducing gain to {gain} "
+                  f"for next capture")
+            scope._send("set_control_value", ["gain", gain])
+
+        result = classify_frame(pixels, sky_bright=sky_bright,
+                                   sky_fraction=sky_fraction)
+        _save_preview(pixels)
         _log_classify(result, alt, az_deg, label)
         return result
 
     result = _check_alt(current, "start")
+
+    if result.get("failed"):
+        print(f"      → Cannot get frame at starting altitude — skipping azimuth")
+        return None, gain
 
     if result["is_sky"]:
         # Already sky — step DOWN to find where obstruction starts
@@ -430,15 +472,17 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
             current -= step_size
             current = max(current, alt_min)
             result = _check_alt(current, "stepping down")
+            if result.get("failed"):
+                continue
             if not result["is_sky"]:
                 # Found obstruction. Boundary is one step above.
                 boundary = current + step_size
                 print(f"      → Boundary found: obstruction at {current:.1f}°, "
                       f"sky confirmed above {boundary:.1f}°")
-                return boundary
+                return boundary, gain
         # Hit the bottom — sky all the way down
         print(f"      → Sky visible all the way to {alt_min:.1f}°!")
-        return alt_min
+        return alt_min, gain
     else:
         # Obstruction — step UP until we get confirmed sky
         print(f"      Obstructed at start — stepping up to find sky...")
@@ -449,6 +493,9 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
             current = min(current, alt_max)
             step_num += 1
             result = _check_alt(current, f"step up #{step_num}")
+            if result.get("failed"):
+                sky_streak = 0
+                continue
             if result["is_sky"]:
                 sky_streak += 1
                 if sky_streak >= confirm_count:
@@ -456,7 +503,7 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
                     boundary = current - (sky_streak - 1) * step_size
                     print(f"      → Boundary confirmed: {sky_streak} consecutive sky "
                           f"readings, sky starts at {boundary:.1f}°")
-                    return boundary
+                    return boundary, gain
                 else:
                     print(f"        ({sky_streak}/{confirm_count} consecutive sky "
                           f"readings needed to confirm — could be hole in tree)")
@@ -465,13 +512,46 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
                     print(f"        (streak broken — was probably a gap in foliage)")
                 sky_streak = 0
 
-        # Hit the top
+        # Hit the top — no sky found
         if sky_streak > 0:
             boundary = current - (sky_streak - 1) * step_size
             print(f"      → Reached {alt_max:.1f}°, boundary at {boundary:.1f}°")
-            return boundary
-        print(f"      → ⚠ No sky found up to {alt_max:.1f}°!")
-        return alt_max
+            return boundary, gain
+
+        # Too dark — increase gain and retry from the top down
+        while gain is not None and gain < 80:
+            gain += 10
+            print(f"      → ⚠ No sky found up to {alt_max:.1f}° — "
+                  f"too dark? Increasing gain to {gain}, retrying from top")
+            scope._send("set_control_value", ["gain", gain])
+            time.sleep(2)
+            current = alt_max
+            result = _check_alt(current, "retry from top")
+            if result.get("failed"):
+                print(f"      → Frame capture failed at top with gain {gain}")
+                continue
+            if result["is_sky"]:
+                print(f"      Sky at {alt_max:.1f}° with gain {gain} — "
+                      f"stepping down to find obstruction...")
+                while current > alt_min:
+                    current -= step_size
+                    current = max(current, alt_min)
+                    result = _check_alt(current, "stepping down (gain adjusted)")
+                    if result.get("failed"):
+                        break
+                    if not result["is_sky"]:
+                        boundary = current + step_size
+                        print(f"      → Boundary found: obstruction at {current:.1f}°, "
+                              f"sky confirmed above {boundary:.1f}°")
+                        return boundary, gain
+                if not result.get("failed"):
+                    print(f"      → Sky visible all the way to {alt_min:.1f}°!")
+                    return alt_min, gain
+            else:
+                print(f"      → Still no sky at {alt_max:.1f}° with gain {gain}")
+
+        print(f"      → ⚠ No sky found up to {alt_max:.1f}° even at gain {gain}!")
+        return None, gain
 
 
 def _load_existing_boundaries(output_path):
@@ -620,18 +700,26 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
         coarse_azimuths = np.array([az_only])
         print(f"  Mode: single azimuth {az_only:.0f}° ({_compass(az_only)})")
     else:
-        coarse_azimuths = np.arange(0, 360, coarse_step)
-        if az_start is not None or az_end is not None:
-            az_s = az_start if az_start is not None else 0.0
-            az_e = az_end if az_end is not None else 360.0
+        if az_start is not None:
+            az_s = az_start
+            az_e = az_end if az_end is not None else az_s + 360.0
             if az_s <= az_e:
-                coarse_azimuths = coarse_azimuths[
-                    (coarse_azimuths >= az_s) & (coarse_azimuths <= az_e)]
+                coarse_azimuths = np.arange(az_s, az_e + coarse_step / 2, coarse_step)
+                coarse_azimuths = coarse_azimuths[coarse_azimuths <= az_e]
             else:
                 # Wraps around 0, e.g. 300 to 60
-                coarse_azimuths = coarse_azimuths[
-                    (coarse_azimuths >= az_s) | (coarse_azimuths <= az_e)]
-            print(f"  Mode: partial scan Az {az_s:.0f}°–{az_e:.0f}°")
+                span = (az_e - az_s) % 360
+                coarse_azimuths = (az_s + np.arange(0, span + coarse_step / 2, coarse_step)) % 360
+                dists = (coarse_azimuths - az_s) % 360
+                coarse_azimuths = coarse_azimuths[dists <= span]
+            print(f"  Mode: partial scan Az {az_s:.0f}°–{az_e:.0f}° "
+                  f"(start exactly at {az_s:.1f}°, step {coarse_step:.0f}°)")
+        elif az_end is not None:
+            coarse_azimuths = np.arange(0, az_end + coarse_step / 2, coarse_step)
+            coarse_azimuths = coarse_azimuths[coarse_azimuths <= az_end]
+            print(f"  Mode: partial scan Az 0°–{az_end:.0f}°")
+        else:
+            coarse_azimuths = np.arange(0, 360, coarse_step)
 
     # Pass 1: Coarse sweep
     print("=" * 60)
@@ -645,6 +733,8 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
     print("=" * 60)
     print()
 
+    failed_azimuths = []
+
     pass1_start = time.time()
     for i, az in enumerate(coarse_azimuths):
         obstime = Time.now()
@@ -652,27 +742,35 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
         elapsed = _fmt_elapsed(time.time() - pass1_start)
         print(f"  [{i+1}/{len(coarse_azimuths)}] Azimuth {az:.0f}° ({direction}) "
               f"[elapsed: {elapsed}]")
-        boundary = find_boundary(scope, az, location, obstime, host,
-                                 alt_min, alt_max,
-                                 start_alt=prev_boundary,
-                                 sky_bright=sky_bright,
-                                 sky_fraction=sky_fraction)
-        boundaries[az] = boundary
-        prev_boundary = boundary
-        print(f"    ✓ Horizon at {az:.0f}° ({direction}): sky visible above {boundary:.1f}°")
+        boundary, gain = find_boundary(scope, az, location, obstime, host,
+                                       alt_min, alt_max,
+                                       start_alt=prev_boundary,
+                                       sky_bright=sky_bright,
+                                       sky_fraction=sky_fraction,
+                                       gain=gain)
+        if boundary is None:
+            failed_azimuths.append((az, direction, "could not determine boundary"))
+            print(f"    ✗ Azimuth {az:.0f}° ({direction}): FAILED — skipping")
+        else:
+            boundaries[az] = boundary
+            prev_boundary = boundary
+            print(f"    ✓ Horizon at {az:.0f}° ({direction}): sky visible above {boundary:.1f}°")
 
-        # Live update — write after every azimuth
-        _save_boundaries(boundaries, margin, lat, lon, coarse_step,
-                         fine_step, output_path)
-        print(f"    💾 {output_path} updated ({len(boundaries)} azimuths)")
+            # Live update — write after every azimuth
+            _save_boundaries(boundaries, margin, lat, lon, coarse_step,
+                             fine_step, output_path)
+            print(f"    💾 {output_path} updated ({len(boundaries)} azimuths)")
         print()
 
     pass1_elapsed = time.time() - pass1_start
     print(f"  Pass 1 complete in {_fmt_elapsed(pass1_elapsed)}")
-    lowest = min(boundaries.values())
-    highest = max(boundaries.values())
-    avg = sum(boundaries.values()) / len(boundaries)
-    print(f"  Horizon range: {lowest:.1f}°–{highest:.1f}° (avg {avg:.1f}°)")
+    if boundaries:
+        lowest = min(boundaries.values())
+        highest = max(boundaries.values())
+        avg = sum(boundaries.values()) / len(boundaries)
+        print(f"  Horizon range: {lowest:.1f}°–{highest:.1f}° (avg {avg:.1f}°)")
+    else:
+        print(f"  ⚠ No successful boundary readings!")
     print()
 
     # Pass 2: Fill in at fine_step where neighbors disagree
@@ -718,17 +816,22 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
                 nearest_coarse = min(coarse_sorted, key=lambda c: min(abs(c - az), 360 - abs(c - az)))
                 hint = boundaries[nearest_coarse]
                 print(f"  [{i+1}/{len(fine_azimuths)}] Azimuth {az:.1f}° ({direction})")
-                boundary = find_boundary(scope, az, location, obstime, host,
-                                         alt_min, alt_max,
-                                         start_alt=hint,
-                                         sky_bright=sky_bright,
-                                         sky_fraction=sky_fraction)
-                boundaries[az] = boundary
-                print(f"    ✓ Horizon at {az:.1f}° ({direction}): sky visible above {boundary:.1f}°")
+                boundary, gain = find_boundary(scope, az, location, obstime, host,
+                                               alt_min, alt_max,
+                                               start_alt=hint,
+                                               sky_bright=sky_bright,
+                                               sky_fraction=sky_fraction,
+                                               gain=gain)
+                if boundary is None:
+                    failed_azimuths.append((az, direction, "could not determine boundary"))
+                    print(f"    ✗ Azimuth {az:.1f}° ({direction}): FAILED — skipping")
+                else:
+                    boundaries[az] = boundary
+                    print(f"    ✓ Horizon at {az:.1f}° ({direction}): sky visible above {boundary:.1f}°")
 
-                _save_boundaries(boundaries, margin, lat, lon, coarse_step,
-                                 fine_step, output_path)
-                print(f"    💾 {output_path} updated ({len(boundaries)} azimuths)")
+                    _save_boundaries(boundaries, margin, lat, lon, coarse_step,
+                                     fine_step, output_path)
+                    print(f"    💾 {output_path} updated ({len(boundaries)} azimuths)")
                 print()
             print(f"  Pass 2 complete in {_fmt_elapsed(time.time() - pass2_start)}")
         else:
@@ -760,5 +863,16 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
         bar = "█" * bar_len
         print(f"    {az:5.1f}° {_compass(az):>3s}  {alt+margin:5.1f}°  {bar}")
     print()
+
+    if failed_azimuths:
+        print("=" * 60)
+        print(f"  ⚠ FAILED POSITIONS ({len(failed_azimuths)}):")
+        print("=" * 60)
+        for az, direction, reason in failed_azimuths:
+            print(f"    {az:5.1f}° ({direction}): {reason}")
+        print()
+        print("  These azimuths were NOT written to the output file.")
+        print("  Re-run with different gain/exposure or try again later.")
+        print()
 
     return mask_data
