@@ -10,98 +10,69 @@
           crossorigin="anonymous"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: #0a0a2e; color: #fff; font-family: sans-serif; overflow: hidden; }
-    #skymap { height: 100vh; width: 100%; }
+    html, body { height: 100%; width: 100%; }
+    body {
+      background: #0a0a2e; color: #fff; font-family: sans-serif;
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    #toolbar {
+      flex: 0 0 auto;
+      display: flex; gap: 8px; padding: 8px 16px;
+      background: #0a0a2e; border-bottom: 1px solid rgba(255,255,255,0.15);
+      align-items: center;
+    }
+    #toolbar button {
+      padding: 8px 20px; border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 4px; background: transparent; color: #fff;
+      font-size: 18px; cursor: pointer; transition: background 0.15s;
+    }
+    #toolbar button:hover { background: rgba(255,255,255,0.1); }
+    #toolbar button.active {
+      background: rgba(78,205,196,0.3); border-color: #4ecdc4;
+    }
+    #toolbar .spacer { flex: 1; }
+    #skymap { flex: 1 1 auto; min-height: 0; }
     #status {
       position: fixed; bottom: 12px; right: 16px;
-      color: rgba(255,255,255,0.4); font-size: 12px; pointer-events: none;
+      color: rgba(255,255,255,0.4); font-size: 18px; pointer-events: none;
     }
   </style>
 </head>
 <body>
+  <div id="toolbar">
+    <button id="btn-sky" class="active" onclick="switchView('sky')">Sky Coverage</button>
+    <button id="btn-horizon" onclick="switchView('horizon')">Horizon View</button>
+    <span class="spacer"></span>
+    <button id="btn-reload" onclick="reloadHorizon()" title="Reload horizon mask from server">&#x21bb; Horizon</button>
+  </div>
   <div id="skymap"></div>
   <div id="status">Loading…</div>
 
   <script>
   'use strict';
 
+  // ── Constants ─────────────────────────────────────────────────────────────
   const SCOPE_COLORS = {
     'Seestar S50': '#4ecdc4',
     'Dwarf 3':     '#ff6b6b',
     'Dwarf mini':  '#ffd93d',
   };
 
-  function fmtExp(sec) {
-    if (sec < 60)   return sec.toFixed(0) + 's';
-    if (sec < 3600) return (sec / 60).toFixed(1) + 'm';
-    return (sec / 3600).toFixed(1) + 'h';
-  }
-
-  function raToHMS(deg) {
-    const h = deg / 15, hours = Math.floor(h), min = Math.floor((h - hours) * 60);
-    return String(hours).padStart(2,'0') + 'h' + String(min).padStart(2,'0') + 'm';
-  }
-
-  function buildTraces(records) {
-    const byScope = {};
-    for (const r of records) {
-      (byScope[r.scope] = byScope[r.scope] || []).push(r);
-    }
-    const traces = [];
-    for (const [scope, color] of Object.entries(SCOPE_COLORS)) {
-      const recs = byScope[scope];
-      if (!recs || !recs.length) continue;
-      const maxExp = Math.max(...recs.map(r => r.total_exposure_sec), 1);
-      traces.push({
-        x: recs.map(r => r.ra_deg),
-        y: recs.map(r => r.dec_deg),
-        type: 'scatter', mode: 'markers', name: scope,
-        marker: {
-          color, opacity: 0.7,
-          size: recs.map(r => Math.max(6, Math.min(40, 6 + 34 * r.total_exposure_sec / maxExp))),
-          line: { width: 1, color: 'white' },
-        },
-        text: recs.map(r =>
-          '<b>' + r.target + '</b><br>' +
-          'RA: ' + raToHMS(r.ra_deg) + ' (' + r.ra_deg.toFixed(2) + '°)<br>' +
-          'DEC: ' + (r.dec_deg >= 0 ? '+' : '') + r.dec_deg.toFixed(2) + '°<br>' +
-          'Frames: ' + r.num_frames + '<br>' +
-          'Exposure: ' + fmtExp(r.total_exposure_sec) + '<br>' +
-          'Filter: ' + r.filter_name + '<br>' +
-          'Gain: ' + r.gain + '<br>' +
-          'Date: ' + ((r.date_obs || '').slice(0,10) || '?') + '<br>' +
-          (r.is_mosaic ? 'MOSAIC' : 'Single')
-        ),
-        hoverinfo: 'text',
-      });
-    }
-    return traces;
-  }
-
-  const LAYOUT = {
-    title: 'Sky Coverage — All Captures',
-    xaxis: {
-      title: 'RA (degrees)', range: [360, 0], dtick: 30,
-      ticktext: Array.from({length: 13}, (_, i) => i*2 + 'h'),
-      tickvals:  Array.from({length: 13}, (_, i) => i * 30),
-      gridcolor: 'rgba(255,255,255,0.1)',
-    },
-    yaxis: {
-      title: 'DEC (degrees)', range: [-90, 90], dtick: 15,
-      gridcolor: 'rgba(255,255,255,0.1)',
-    },
-    plot_bgcolor: '#0a0a2e', paper_bgcolor: '#0a0a2e',
-    font: { color: 'white' },
-    legend: { bgcolor: 'rgba(0,0,0,0.5)', font: { size: 14 } },
-    margin: { l: 60, r: 30, t: 60, b: 60 },
-  };
-
-  // ── Horizon + sun overlay ─────────────────────────────────────────────────
-  let MASK = [], LAT = null, LON = null, NUM_BASE = 0;
-  const NR = 180, ND = 90, D2R = Math.PI/180, R2D = 180/Math.PI;
+  const D2R = Math.PI/180, R2D = 180/Math.PI;
+  const NR = 180, ND = 90;
   const raG  = Array.from({length: NR}, (_, i) => i * 360 / NR);
   const decG = Array.from({length: ND}, (_, i) => -90 + i * 180 / (ND - 1));
 
+  // ── State ─────────────────────────────────────────────────────────────────
+  let RECORDS = [];
+  let MASK = [], LAT = null, LON = null;
+  let HORIZONS = [];
+  let NUM_BASE = 0, NUM_BASE_HZ = 0;
+  let currentView = 'sky';
+  let selectedTarget = null;
+  let refreshTimer = null;
+
+  // ── Shared utilities ──────────────────────────────────────────────────────
   function cl(v) { return v < -1 ? -1 : v > 1 ? 1 : v; }
 
   function sunPos(dt) {
@@ -164,8 +135,118 @@
       * (MASK[hi].min_altitude - MASK[lo].min_altitude);
   }
 
-  function refresh() {
-    if (LAT === null) return;
+  function fmtExp(sec) {
+    if (sec < 60)   return sec.toFixed(0) + 's';
+    if (sec < 3600) return (sec / 60).toFixed(1) + 'm';
+    return (sec / 3600).toFixed(1) + 'h';
+  }
+
+  function raToHMS(deg) {
+    const h = deg / 15, hours = Math.floor(h), min = Math.floor((h - hours) * 60);
+    return String(hours).padStart(2,'0') + 'h' + String(min).padStart(2,'0') + 'm';
+  }
+
+  function cardinalDir(az) {
+    const dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE',
+                  'S','SSW','SW','WSW','W','WNW','NW','NNW'];
+    return dirs[Math.round(az / 22.5) % 16];
+  }
+
+  function fmtTime(dt) {
+    return dt.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
+  }
+
+  // ── Layouts ───────────────────────────────────────────────────────────────
+  const LAYOUT_SKY = {
+    title: { text: 'Sky Coverage — All Captures', font: { size: 24 } },
+    xaxis: {
+      title: { text: 'RA (degrees)', font: { size: 18 } },
+      range: [360, 0], dtick: 30,
+      ticktext: Array.from({length: 13}, (_, i) => i*2 + 'h'),
+      tickvals:  Array.from({length: 13}, (_, i) => i * 30),
+      tickfont: { size: 16 },
+      gridcolor: 'rgba(255,255,255,0.1)',
+    },
+    yaxis: {
+      title: { text: 'DEC (degrees)', font: { size: 18 } },
+      range: [-90, 90], dtick: 15,
+      tickfont: { size: 16 },
+      gridcolor: 'rgba(255,255,255,0.1)',
+    },
+    plot_bgcolor: '#0a0a2e', paper_bgcolor: '#0a0a2e',
+    font: { color: 'white', size: 16 },
+    legend: { bgcolor: 'rgba(0,0,0,0.5)', font: { size: 18 } },
+    margin: { l: 80, r: 30, t: 80, b: 70 },
+  };
+
+  const LAYOUT_HORIZON = {
+    title: { text: 'Horizon View', font: { size: 24 } },
+    xaxis: {
+      title: { text: 'Azimuth', font: { size: 18 } },
+      range: [0, 360], dtick: 45,
+      ticktext: ['N','NE','E','SE','S','SW','W','NW','N'],
+      tickvals: [0, 45, 90, 135, 180, 225, 270, 315, 360],
+      tickfont: { size: 16 },
+      gridcolor: 'rgba(255,255,255,0.1)',
+    },
+    yaxis: {
+      title: { text: 'Altitude (°)', font: { size: 18 } },
+      range: [0, 90], dtick: 10,
+      tickfont: { size: 16 },
+      gridcolor: 'rgba(255,255,255,0.1)',
+    },
+    plot_bgcolor: '#0a0a2e', paper_bgcolor: '#0a0a2e',
+    font: { color: 'white', size: 16 },
+    legend: { bgcolor: 'rgba(0,0,0,0.5)', font: { size: 18 } },
+    margin: { l: 80, r: 30, t: 80, b: 70 },
+  };
+
+  // ── Sky Coverage view ─────────────────────────────────────────────────────
+  function buildTraces(records) {
+    const byScope = {};
+    for (const r of records) {
+      (byScope[r.scope] = byScope[r.scope] || []).push(r);
+    }
+    const traces = [];
+    for (const [scope, color] of Object.entries(SCOPE_COLORS)) {
+      const recs = byScope[scope];
+      if (!recs || !recs.length) continue;
+      const maxExp = Math.max(...recs.map(r => r.total_exposure_sec), 1);
+      traces.push({
+        x: recs.map(r => r.ra_deg),
+        y: recs.map(r => r.dec_deg),
+        type: 'scatter', mode: 'markers', name: scope,
+        marker: {
+          color, opacity: 0.7,
+          size: recs.map(r => Math.max(6, Math.min(40, 6 + 34 * r.total_exposure_sec / maxExp))),
+          line: { width: 1, color: 'white' },
+        },
+        text: recs.map(r =>
+          '<b>' + r.target + '</b><br>' +
+          'RA: ' + raToHMS(r.ra_deg) + ' (' + r.ra_deg.toFixed(2) + '°)<br>' +
+          'DEC: ' + (r.dec_deg >= 0 ? '+' : '') + r.dec_deg.toFixed(2) + '°<br>' +
+          'Frames: ' + r.num_frames + '<br>' +
+          'Exposure: ' + fmtExp(r.total_exposure_sec) + '<br>' +
+          'Filter: ' + r.filter_name + '<br>' +
+          'Gain: ' + r.gain + '<br>' +
+          'Date: ' + ((r.date_obs || '').slice(0,10) || '?') + '<br>' +
+          (r.is_mosaic ? 'MOSAIC' : 'Single')
+        ),
+        hoverinfo: 'text',
+      });
+    }
+    return traces;
+  }
+
+  function renderSkyView() {
+    const traces = buildTraces(RECORDS);
+    Plotly.newPlot('skymap', traces, LAYOUT_SKY, {responsive: true});
+    NUM_BASE = document.getElementById('skymap').data.length;
+    if (LAT !== null) setTimeout(refreshSky, 200);
+  }
+
+  function refreshSky() {
+    if (LAT === null || currentView !== 'sky') return;
     const div = document.getElementById('skymap');
     const n = div.data.length;
     if (n > NUM_BASE) {
@@ -215,7 +296,7 @@
         hoverinfo: 'skip' },
     ]);
     const ts = now.toLocaleTimeString();
-    Plotly.relayout(div, { title:
+    Plotly.relayout(div, { 'title.text':
       'Sky Coverage — All Captures<br>' +
       '<sup style="color:rgba(255,255,255,0.4);font-weight:normal">' +
       'Overlays at ' + ts + ' (auto-refresh 5 min)</sup>'
@@ -223,6 +304,312 @@
     document.getElementById('status').textContent = 'Updated ' + ts;
   }
 
+  // ── Horizon view ──────────────────────────────────────────────────────────
+  function drawPath() {
+    const div = document.getElementById('skymap');
+
+    const toRemove = [];
+    for (let i = div.data.length - 1; i >= 0; i--) {
+      if (div.data[i]._isPath) toRemove.push(i);
+    }
+    if (toRemove.length) Plotly.deleteTraces(div, toRemove);
+    Plotly.relayout(div, {annotations: []});
+
+    if (!selectedTarget) return;
+
+    const ra = selectedTarget.ra, dec = selectedTarget.dec, tgt = selectedTarget.name;
+    const now = new Date();
+
+    const pts = [];
+    for (let m = -720; m <= 720; m += 2) {
+      const dt = new Date(now.getTime() + m * 60000);
+      const L = lst(dt);
+      const aa = rd2aa(ra, dec, L);
+      const hAlt = mAlt(aa.az);
+      pts.push({az: aa.az, alt: aa.alt, time: dt, hAlt: hAlt});
+    }
+
+    const pathAz = [], pathAlt = [], pathHover = [];
+    let prevAz = null;
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      if (p.alt <= 0) {
+        if (pathAz.length && pathAz[pathAz.length - 1] !== null) {
+          pathAz.push(null); pathAlt.push(null); pathHover.push('');
+        }
+        prevAz = null;
+        continue;
+      }
+      if (prevAz !== null && Math.abs(p.az - prevAz) > 180) {
+        pathAz.push(null); pathAlt.push(null); pathHover.push('');
+      }
+      prevAz = p.az;
+      pathAz.push(p.az);
+      pathAlt.push(p.alt);
+      pathHover.push(
+        fmtTime(p.time) + '<br>' +
+        cardinalDir(p.az) + ' Az ' + p.az.toFixed(1) + '° Alt ' + p.alt.toFixed(1) + '°'
+      );
+    }
+
+    if (!pathAz.length) return;
+
+    let transit = null;
+    for (let i = 0; i < pts.length; i++) {
+      if (pts[i].alt > 0 && (!transit || pts[i].alt > transit.alt)) {
+        transit = pts[i];
+      }
+    }
+
+    const crossings = [];
+    for (let i = 1; i < pts.length; i++) {
+      const prev = pts[i - 1], curr = pts[i];
+      if (prev.alt <= 0 && curr.alt <= 0) continue;
+      const prevVis = prev.alt > 0 && prev.alt >= prev.hAlt;
+      const currVis = curr.alt > 0 && curr.alt >= curr.hAlt;
+      if (prevVis !== currVis) {
+        const cp = currVis ? curr : prev;
+        crossings.push({
+          az: cp.az, alt: Math.max(cp.alt, cp.hAlt),
+          time: cp.time,
+          type: currVis ? 'rise' : 'set'
+        });
+      }
+    }
+
+    const newTraces = [];
+    const annotations = [];
+
+    newTraces.push({
+      x: pathAz, y: pathAlt,
+      type: 'scatter', mode: 'lines',
+      line: {color: 'rgba(255,255,255,0.4)', width: 1.5, dash: 'dot'},
+      name: tgt + ' track',
+      showlegend: true,
+      text: pathHover, hoverinfo: 'text',
+      _isPath: true
+    });
+
+    if (transit) {
+      newTraces.push({
+        x: [transit.az], y: [transit.alt],
+        type: 'scatter', mode: 'markers',
+        marker: {size: 14, color: '#FFD700', symbol: 'star'},
+        showlegend: false,
+        hovertext: ['Transit: ' + fmtTime(transit.time) + '<br>Alt ' + transit.alt.toFixed(1) + '°'],
+        hoverinfo: 'text',
+        _isPath: true
+      });
+      annotations.push({
+        x: transit.az, y: transit.alt,
+        text: fmtTime(transit.time),
+        showarrow: true, arrowhead: 0, arrowcolor: '#FFD700',
+        ax: 0, ay: -25,
+        font: {color: '#FFD700', size: 16},
+        bgcolor: 'rgba(0,0,0,0.6)', borderpad: 3
+      });
+    }
+
+    if (crossings.length) {
+      const cAz = [], cAlt = [], cHover = [], cColors = [];
+      for (let i = 0; i < crossings.length; i++) {
+        const c = crossings[i];
+        const color = c.type === 'rise' ? '#4ecdc4' : '#ff6b6b';
+        cAz.push(c.az);
+        cAlt.push(c.alt);
+        cColors.push(color);
+        cHover.push((c.type === 'rise' ? 'Rises' : 'Sets') + ': ' + fmtTime(c.time));
+        annotations.push({
+          x: c.az, y: c.alt,
+          text: (c.type === 'rise' ? '▲ ' : '▼ ') + fmtTime(c.time),
+          showarrow: true, arrowhead: 0, arrowcolor: color,
+          ax: 0, ay: -25,
+          font: {color: color, size: 16},
+          bgcolor: 'rgba(0,0,0,0.6)', borderpad: 3
+        });
+      }
+      newTraces.push({
+        x: cAz, y: cAlt,
+        type: 'scatter', mode: 'markers',
+        marker: {size: 10, color: cColors, symbol: 'diamond'},
+        showlegend: false,
+        hovertext: cHover, hoverinfo: 'text',
+        _isPath: true
+      });
+    }
+
+    if (newTraces.length) Plotly.addTraces(div, newTraces);
+    if (annotations.length) Plotly.relayout(div, {annotations: annotations});
+  }
+
+  function renderHorizonView() {
+    const staticTraces = [];
+    for (const h of HORIZONS) {
+      const azArr = [], altArr = [];
+      for (let a = 0; a <= 360; a++) {
+        azArr.push(a);
+        altArr.push(mAlt(a));
+      }
+      staticTraces.push({
+        x: azArr, y: altArr,
+        fill: 'tozeroy',
+        fillcolor: h.fillcolor,
+        line: { color: h.color, width: 2 },
+        name: h.label,
+        hoverinfo: 'skip'
+      });
+    }
+    NUM_BASE_HZ = staticTraces.length;
+    Plotly.newPlot('skymap', staticTraces, LAYOUT_HORIZON, {responsive: true});
+
+    document.getElementById('skymap').on('plotly_click', function(data) {
+      const pt = data.points[0];
+      if (!pt.customdata) return;
+      const ra = pt.customdata[0], dec = pt.customdata[1], name = pt.customdata[2];
+      if (selectedTarget && selectedTarget.ra === ra && selectedTarget.dec === dec) {
+        selectedTarget = null;
+      } else {
+        selectedTarget = {ra: ra, dec: dec, name: name};
+      }
+      drawPath();
+    });
+
+    refreshHorizon();
+  }
+
+  function refreshHorizon() {
+    if (LAT === null || currentView !== 'horizon') return;
+    const div = document.getElementById('skymap');
+    const n = div.data.length;
+    if (n > NUM_BASE_HZ) {
+      const d = [];
+      for (let i = NUM_BASE_HZ; i < n; i++) d.push(i);
+      Plotly.deleteTraces(div, d);
+    }
+
+    const now = new Date(), L = lst(now), sun = sunPos(now);
+    const sunAA = rd2aa(sun.ra, sun.dec, L);
+
+    const byScope = {};
+    for (const r of RECORDS) {
+      const aa = rd2aa(r.ra_deg, r.dec_deg, L);
+      if (aa.alt < 0) continue;
+      const scope = r.scope || 'Unknown';
+      if (!byScope[scope]) byScope[scope] = [];
+      byScope[scope].push({
+        target: r.target, az: aa.az, alt: aa.alt,
+        total_exposure_sec: r.total_exposure_sec,
+        num_frames: r.num_frames,
+        filter_name: r.filter_name,
+        ra_deg: r.ra_deg, dec_deg: r.dec_deg
+      });
+    }
+
+    const newTraces = [];
+    for (const [scope, color] of Object.entries(SCOPE_COLORS)) {
+      const recs = byScope[scope];
+      if (!recs || !recs.length) continue;
+      let maxExp = 1;
+      for (const rc of recs) if (rc.total_exposure_sec > maxExp) maxExp = rc.total_exposure_sec;
+
+      const xv = [], yv = [], sz = [], txt = [], cd = [];
+      for (const rc of recs) {
+        xv.push(rc.az);
+        yv.push(rc.alt);
+        sz.push(Math.max(8, Math.min(30, 8 + 22 * rc.total_exposure_sec / maxExp)));
+        txt.push(
+          '<b>' + rc.target + '</b><br>' +
+          cardinalDir(rc.az) + ' Az ' + rc.az.toFixed(1) + '°  Alt ' + rc.alt.toFixed(1) + '°<br>' +
+          'Frames: ' + rc.num_frames + '<br>' +
+          'Exposure: ' + fmtExp(rc.total_exposure_sec) + '<br>' +
+          'Filter: ' + rc.filter_name
+        );
+        cd.push([rc.ra_deg, rc.dec_deg, rc.target]);
+      }
+      newTraces.push({
+        x: xv, y: yv,
+        customdata: cd,
+        type: 'scatter', mode: 'markers', name: scope,
+        marker: { color: color, opacity: 0.8, size: sz,
+                  line: { width: 1, color: 'white' } },
+        text: txt, hoverinfo: 'text'
+      });
+    }
+
+    if (sunAA.alt > -2) {
+      newTraces.push({
+        x: [sunAA.az], y: [Math.max(0, sunAA.alt)],
+        type: 'scatter', mode: 'markers',
+        name: 'Sun', showlegend: true,
+        marker: { size: 18, color: '#FFD700', symbol: 'circle',
+                  line: { width: 2, color: '#FF8C00' } },
+        hovertext: 'Sun  ' + cardinalDir(sunAA.az) +
+                   ' Az ' + sunAA.az.toFixed(1) + '° Alt ' + sunAA.alt.toFixed(1) + '°',
+        hoverinfo: 'text'
+      });
+    }
+
+    if (newTraces.length) Plotly.addTraces(div, newTraces);
+
+    const ts = now.toLocaleTimeString();
+    let aboveCount = 0;
+    for (const k in byScope) aboveCount += byScope[k].length;
+    Plotly.relayout(div, { 'title.text':
+      'Horizon View — ' + aboveCount + ' targets above horizon<br>' +
+      '<sup style="color:rgba(255,255,255,0.4);font-weight:normal">' +
+      ts + ' (auto-refresh 5 min)</sup>'
+    });
+    document.getElementById('status').textContent = 'Updated ' + ts;
+    drawPath();
+  }
+
+  // ── View switching ────────────────────────────────────────────────────────
+  function switchView(view) {
+    if (view === currentView) return;
+    currentView = view;
+    document.getElementById('btn-sky').classList.toggle('active', view === 'sky');
+    document.getElementById('btn-horizon').classList.toggle('active', view === 'horizon');
+    if (refreshTimer) clearInterval(refreshTimer);
+    renderCurrentView();
+  }
+
+  function renderCurrentView() {
+    if (currentView === 'sky') {
+      renderSkyView();
+      refreshTimer = setInterval(refreshSky, 300000);
+    } else {
+      renderHorizonView();
+      refreshTimer = setInterval(refreshHorizon, 300000);
+    }
+  }
+
+  async function reloadHorizon() {
+    const status = document.getElementById('status');
+    status.textContent = 'Reloading horizon…';
+    try {
+      const horizon = await fetch('/api/horizon').then(r => r.json());
+      if (horizon.boundary && horizon.boundary.length) {
+        MASK = horizon.boundary;
+        LAT = horizon.lat;
+        LON = horizon.lon;
+        HORIZONS = [{
+          label: 'Horizon',
+          boundary: horizon.boundary,
+          color: '#4ecdc4',
+          fillcolor: 'rgba(78,205,196,0.18)',
+        }];
+        status.textContent = 'Horizon reloaded (' + MASK.length + ' points)';
+        if (refreshTimer) clearInterval(refreshTimer);
+        renderCurrentView();
+      } else {
+        status.textContent = 'No horizon data available';
+      }
+    } catch(e) {
+      status.textContent = 'Reload failed: ' + e.message;
+    }
+  }
+
+  // ── Bootstrap ─────────────────────────────────────────────────────────────
   async function init() {
     const status = document.getElementById('status');
     try {
@@ -231,18 +618,20 @@
         fetch('/api/horizon').then(r => r.json()),
       ]);
 
-      const traces = buildTraces(records);
-      await Plotly.newPlot('skymap', traces, LAYOUT, {responsive: true});
-      NUM_BASE = document.getElementById('skymap').data.length;
-      status.textContent = records.length + ' captures loaded';
-
-      if (horizon.lat !== null) {
+      RECORDS = records;
+      if (horizon.boundary && horizon.boundary.length) {
         LAT = horizon.lat;
         LON = horizon.lon;
         MASK = horizon.boundary;
-        setTimeout(refresh, 200);
-        setInterval(refresh, 300000);
+        HORIZONS = [{
+          label: 'Horizon',
+          boundary: horizon.boundary,
+          color: '#4ecdc4',
+          fillcolor: 'rgba(78,205,196,0.18)',
+        }];
       }
+      status.textContent = records.length + ' captures loaded';
+      renderCurrentView();
     } catch(e) {
       status.textContent = 'Error: ' + e.message;
       console.error(e);
