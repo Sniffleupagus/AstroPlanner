@@ -12,6 +12,12 @@ cache/
 skymap.html
 skymap.png
 masks/*.json
+horizon.jpg
+horizon1.jpg
+horizon2.jpg
+horizon_scan.jpg
+horizon_view.html
+
 
 # Session notes and handoff docs — working scratchpads, not repo artifacts
 HANDOFF.md

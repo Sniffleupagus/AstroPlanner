@@ -19,6 +19,7 @@ _ARCHIVE = os.environ.get(
     "/mnt/zarchive/Pictures/Astrophotography",
 )
 _HORIZON_MASK = os.environ.get("ASTROPLANNER_MASK", "masks/horizon.json")
+_MASKS_DIR = Path(os.environ.get("ASTROPLANNER_MASKS_DIR", "masks"))
 _STATIC = Path(__file__).parent / "static"
 
 app = FastAPI(title="AstroPlanner", version="0.1.0")
@@ -61,6 +62,23 @@ def get_horizon():
         "lat": loc.get("lat"),
         "lon": loc.get("lon"),
     }
+
+
+@app.get("/api/horizons")
+def get_horizons():
+    results = []
+    for p in sorted(_MASKS_DIR.glob("horizon*.json")):
+        with open(p) as f:
+            data = json.load(f)
+        loc = data.get("location", {})
+        results.append({
+            "filename": p.name,
+            "name": data.get("name", p.stem),
+            "boundary": data.get("boundary", []),
+            "lat": loc.get("lat"),
+            "lon": loc.get("lon"),
+        })
+    return results
 
 
 @app.get("/api/thumbnail")

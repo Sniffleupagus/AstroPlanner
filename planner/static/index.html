@@ -31,6 +31,11 @@
       background: rgba(78,205,196,0.3); border-color: #4ecdc4;
     }
     #toolbar .spacer { flex: 1; }
+    #horizon-select {
+      padding: 6px 10px; border-radius: 4px; font-size: 16px;
+      background: #1a1a4e; color: #fff; border: 1px solid rgba(255,255,255,0.3);
+      cursor: pointer;
+    }
     #skymap { flex: 1 1 auto; min-height: 0; }
     #status {
       position: fixed; bottom: 12px; right: 16px;
@@ -43,7 +48,10 @@
     <button id="btn-sky" class="active" onclick="switchView('sky')">Sky Coverage</button>
     <button id="btn-horizon" onclick="switchView('horizon')">Horizon View</button>
     <span class="spacer"></span>
-    <button id="btn-reload" onclick="reloadHorizon()" title="Reload horizon mask from server">&#x21bb; Horizon</button>
+    <select id="horizon-select" onchange="selectHorizon(this.value)" title="Choose horizon / location">
+      <option value="">No horizon</option>
+    </select>
+    <button id="btn-reload" onclick="reloadHorizon()" title="Reload horizon masks from server">&#x21bb; Horizon</button>
   </div>
   <div id="skymap"></div>
   <div id="status">Loading…</div>
@@ -65,8 +73,9 @@
 
   // ── State ─────────────────────────────────────────────────────────────────
   let RECORDS = [];
-  let MASK = [], LAT = null, LON = null;
-  let HORIZONS = [];
+  let LAT = null, LON = null;
+  let ALL_HORIZONS = [];
+  let activeHorizonIdx = -1;
   let NUM_BASE = 0, NUM_BASE_HZ = 0;
   let currentView = 'sky';
   let selectedTarget = null;
@@ -122,17 +131,18 @@
   }
 
   function mAlt(az) {
-    if (!MASK.length) return 0;
+    const h = ALL_HORIZONS[activeHorizonIdx];
+    if (!h || !h.boundary.length) return 0;
     az = ((az % 360) + 360) % 360;
-    const n = MASK.length;
+    const b = h.boundary, n = b.length;
     let i = 0;
-    for (; i < n; i++) if (MASK[i].azimuth > az) break;
+    for (; i < n; i++) if (b[i].azimuth > az) break;
     const hi = i % n, lo = (i - 1 + n) % n;
-    const s = ((MASK[hi].azimuth - MASK[lo].azimuth) % 360 + 360) % 360;
-    if (!s) return MASK[lo].min_altitude;
-    return MASK[lo].min_altitude
-      + (((az - MASK[lo].azimuth) % 360 + 360) % 360) / s
-      * (MASK[hi].min_altitude - MASK[lo].min_altitude);
+    const s = ((b[hi].azimuth - b[lo].azimuth) % 360 + 360) % 360;
+    if (!s) return b[lo].min_altitude;
+    return b[lo].min_altitude
+      + (((az - b[lo].azimuth) % 360 + 360) % 360) / s
+      * (b[hi].min_altitude - b[lo].min_altitude);
   }
 
   function fmtExp(sec) {
@@ -444,7 +454,8 @@
 
   function renderHorizonView() {
     const staticTraces = [];
-    for (const h of HORIZONS) {
+    const h = ALL_HORIZONS[activeHorizonIdx];
+    if (h) {
       const azArr = [], altArr = [];
       for (let a = 0; a <= 360; a++) {
         azArr.push(a);
@@ -453,8 +464,8 @@
       staticTraces.push({
         x: azArr, y: altArr,
         fill: 'tozeroy',
-        fillcolor: h.fillcolor,
-        line: { color: h.color, width: 2 },
+        fillcolor: 'rgba(78,205,196,0.18)',
+        line: { color: '#4ecdc4', width: 2 },
         name: h.label,
         hoverinfo: 'skip'
       });
@@ -583,22 +594,61 @@
     }
   }
 
+  function buildHorizonDropdown() {
+    const sel = document.getElementById('horizon-select');
+    const prevVal = sel.value;
+    sel.innerHTML = '<option value="">No horizon</option>';
+    for (let i = 0; i < ALL_HORIZONS.length; i++) {
+      const opt = document.createElement('option');
+      opt.value = String(i);
+      opt.textContent = ALL_HORIZONS[i].label;
+      sel.appendChild(opt);
+    }
+    if (activeHorizonIdx >= 0) sel.value = String(activeHorizonIdx);
+  }
+
+  function selectHorizon(val) {
+    activeHorizonIdx = val === '' ? -1 : parseInt(val, 10);
+    const h = ALL_HORIZONS[activeHorizonIdx];
+    if (h) {
+      LAT = h.lat;
+      LON = h.lon;
+    }
+    if (refreshTimer) clearInterval(refreshTimer);
+    renderCurrentView();
+  }
+
+  function loadHorizonsData(horizons) {
+    const prevFilename = activeHorizonIdx >= 0
+      ? ALL_HORIZONS[activeHorizonIdx].filename : null;
+
+    ALL_HORIZONS = horizons.map(h => ({
+      filename: h.filename,
+      label: h.name,
+      boundary: h.boundary,
+      lat: h.lat,
+      lon: h.lon,
+    }));
+
+    activeHorizonIdx = 0;
+    if (prevFilename) {
+      const found = ALL_HORIZONS.findIndex(h => h.filename === prevFilename);
+      if (found >= 0) activeHorizonIdx = found;
+    }
+
+    const h = ALL_HORIZONS[activeHorizonIdx];
+    if (h) { LAT = h.lat; LON = h.lon; }
+    buildHorizonDropdown();
+  }
+
   async function reloadHorizon() {
     const status = document.getElementById('status');
-    status.textContent = 'Reloading horizon…';
+    status.textContent = 'Reloading horizons…';
     try {
-      const horizon = await fetch('/api/horizon').then(r => r.json());
-      if (horizon.boundary && horizon.boundary.length) {
-        MASK = horizon.boundary;
-        LAT = horizon.lat;
-        LON = horizon.lon;
-        HORIZONS = [{
-          label: 'Horizon',
-          boundary: horizon.boundary,
-          color: '#4ecdc4',
-          fillcolor: 'rgba(78,205,196,0.18)',
-        }];
-        status.textContent = 'Horizon reloaded (' + MASK.length + ' points)';
+      const horizons = await fetch('/api/horizons').then(r => r.json());
+      if (horizons.length) {
+        loadHorizonsData(horizons);
+        status.textContent = horizons.length + ' horizon(s) loaded';
         if (refreshTimer) clearInterval(refreshTimer);
         renderCurrentView();
       } else {
@@ -613,24 +663,16 @@
   async function init() {
     const status = document.getElementById('status');
     try {
-      const [records, horizon] = await Promise.all([
+      const [records, horizons] = await Promise.all([
         fetch('/api/captures').then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); }),
-        fetch('/api/horizon').then(r => r.json()),
+        fetch('/api/horizons').then(r => r.json()),
       ]);
 
       RECORDS = records;
-      if (horizon.boundary && horizon.boundary.length) {
-        LAT = horizon.lat;
-        LON = horizon.lon;
-        MASK = horizon.boundary;
-        HORIZONS = [{
-          label: 'Horizon',
-          boundary: horizon.boundary,
-          color: '#4ecdc4',
-          fillcolor: 'rgba(78,205,196,0.18)',
-        }];
+      if (horizons.length) {
+        loadHorizonsData(horizons);
       }
-      status.textContent = records.length + ' captures loaded';
+      status.textContent = records.length + ' captures, ' + horizons.length + ' horizon(s) loaded';
       renderCurrentView();
     } catch(e) {
       status.textContent = 'Error: ' + e.message;

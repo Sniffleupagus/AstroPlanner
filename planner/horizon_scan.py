@@ -457,7 +457,12 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
             print(f"        💡 Nearly saturated — reducing gain to {gain} "
                   f"for next capture")
             scope._send("set_control_value", ["gain", gain])
-
+        elif (bright < 0.75 and result.get("bright_fraction", 0) >= 1.0
+                and gain is not None and gain < 220):
+            gain += 5
+            print(f"        💡 Dim Sky — increasing gain to {gain} "
+                  f"for next capture")
+            scope._send("set_control_value", ["gain", gain])
         return result
 
     result = _check_alt(current, "start")
@@ -508,7 +513,7 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
                     return boundary, gain
                 else:
                     print(f"        ({sky_streak}/{confirm_count} consecutive sky "
-                          f"readings needed to confirm — could be hole in tree)")
+                          f"readings needed to confirm — could be gap in tree)")
             else:
                 if sky_streak > 0:
                     print(f"        (streak broken — was probably a gap in foliage)")
