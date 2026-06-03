@@ -71,6 +71,11 @@
   const raG  = Array.from({length: NR}, (_, i) => i * 360 / NR);
   const decG = Array.from({length: ND}, (_, i) => -90 + i * 180 / (ND - 1));
 
+  const TARGET_COLORS = [
+    '#ff6b6b','#ffd93d','#a855f7','#f97316',
+    '#06b6d4','#84cc16','#ec4899','#34d399',
+  ];
+
   // ── State ─────────────────────────────────────────────────────────────────
   let RECORDS = [];
   let LAT = null, LON = null;
@@ -80,6 +85,8 @@
   let currentView = 'sky';
   let selectedTarget = null;
   let refreshTimer = null;
+  let TARGET_LIST = [];
+  let targetVisibility = {};
 
   // ── Shared utilities ──────────────────────────────────────────────────────
   function cl(v) { return v < -1 ? -1 : v > 1 ? 1 : v; }
@@ -315,21 +322,8 @@
   }
 
   // ── Horizon view ──────────────────────────────────────────────────────────
-  function drawPath() {
-    const div = document.getElementById('skymap');
-
-    const toRemove = [];
-    for (let i = div.data.length - 1; i >= 0; i--) {
-      if (div.data[i]._isPath) toRemove.push(i);
-    }
-    if (toRemove.length) Plotly.deleteTraces(div, toRemove);
-    Plotly.relayout(div, {annotations: []});
-
-    if (!selectedTarget) return;
-
-    const ra = selectedTarget.ra, dec = selectedTarget.dec, tgt = selectedTarget.name;
+  function computeTrack(ra, dec, name) {
     const now = new Date();
-
     const pts = [];
     for (let m = -720; m <= 720; m += 2) {
       const dt = new Date(now.getTime() + m * 60000);
@@ -357,12 +351,11 @@
       pathAz.push(p.az);
       pathAlt.push(p.alt);
       pathHover.push(
+        name + '<br>' +
         fmtTime(p.time) + '<br>' +
         cardinalDir(p.az) + ' Az ' + p.az.toFixed(1) + '° Alt ' + p.alt.toFixed(1) + '°'
       );
     }
-
-    if (!pathAz.length) return;
 
     let transit = null;
     for (let i = 0; i < pts.length; i++) {
@@ -387,32 +380,51 @@
       }
     }
 
+    return {pathAz, pathAlt, pathHover, transit, crossings};
+  }
+
+  function drawPath() {
+    const div = document.getElementById('skymap');
+
+    const toRemove = [];
+    for (let i = div.data.length - 1; i >= 0; i--) {
+      if (div.data[i]._isPath) toRemove.push(i);
+    }
+    if (toRemove.length) Plotly.deleteTraces(div, toRemove);
+    Plotly.relayout(div, {annotations: []});
+
+    if (!selectedTarget) return;
+
+    const tgt = selectedTarget.name;
+    const track = computeTrack(selectedTarget.ra, selectedTarget.dec, tgt);
+    if (!track.pathAz.length) return;
+
     const newTraces = [];
     const annotations = [];
 
     newTraces.push({
-      x: pathAz, y: pathAlt,
+      x: track.pathAz, y: track.pathAlt,
       type: 'scatter', mode: 'lines',
       line: {color: 'rgba(255,255,255,0.4)', width: 1.5, dash: 'dot'},
       name: tgt + ' track',
       showlegend: true,
-      text: pathHover, hoverinfo: 'text',
+      text: track.pathHover, hoverinfo: 'text',
       _isPath: true
     });
 
-    if (transit) {
+    if (track.transit) {
       newTraces.push({
-        x: [transit.az], y: [transit.alt],
+        x: [track.transit.az], y: [track.transit.alt],
         type: 'scatter', mode: 'markers',
         marker: {size: 14, color: '#FFD700', symbol: 'star'},
         showlegend: false,
-        hovertext: ['Transit: ' + fmtTime(transit.time) + '<br>Alt ' + transit.alt.toFixed(1) + '°'],
+        hovertext: ['Transit: ' + fmtTime(track.transit.time) + '<br>Alt ' + track.transit.alt.toFixed(1) + '°'],
         hoverinfo: 'text',
         _isPath: true
       });
       annotations.push({
-        x: transit.az, y: transit.alt,
-        text: fmtTime(transit.time),
+        x: track.transit.az, y: track.transit.alt,
+        text: fmtTime(track.transit.time),
         showarrow: true, arrowhead: 0, arrowcolor: '#FFD700',
         ax: 0, ay: -25,
         font: {color: '#FFD700', size: 16},
@@ -420,10 +432,9 @@
       });
     }
 
-    if (crossings.length) {
+    if (track.crossings.length) {
       const cAz = [], cAlt = [], cHover = [], cColors = [];
-      for (let i = 0; i < crossings.length; i++) {
-        const c = crossings[i];
+      for (const c of track.crossings) {
         const color = c.type === 'rise' ? '#4ecdc4' : '#ff6b6b';
         cAz.push(c.az);
         cAlt.push(c.alt);
@@ -483,6 +494,14 @@
         selectedTarget = {ra: ra, dec: dec, name: name};
       }
       drawPath();
+    });
+
+    document.getElementById('skymap').on('plotly_legendclick', function(e) {
+      const trace = document.getElementById('skymap').data[e.curveNumber];
+      if (trace._targetId) {
+        const willHide = trace.visible === true || trace.visible === undefined;
+        targetVisibility[trace._targetId] = !willHide;
+      }
     });
 
     refreshHorizon();
@@ -557,6 +576,25 @@
         hovertext: 'Sun  ' + cardinalDir(sunAA.az) +
                    ' Az ' + sunAA.az.toFixed(1) + '° Alt ' + sunAA.alt.toFixed(1) + '°',
         hoverinfo: 'text'
+      });
+    }
+
+    for (let ti = 0; ti < TARGET_LIST.length; ti++) {
+      const tgt = TARGET_LIST[ti];
+      const label = tgt.id + (tgt.name ? ' (' + tgt.name + ')' : '');
+      const color = TARGET_COLORS[ti % TARGET_COLORS.length];
+      const track = computeTrack(tgt.ra, tgt.dec, label);
+      if (!track.pathAz.length) continue;
+      const vis = targetVisibility[tgt.id] === false ? 'legendonly' : true;
+      newTraces.push({
+        x: track.pathAz, y: track.pathAlt,
+        type: 'scatter', mode: 'lines',
+        line: {color: color, width: 2},
+        name: label,
+        showlegend: true,
+        visible: vis,
+        text: track.pathHover, hoverinfo: 'text',
+        _targetId: tgt.id
       });
     }
 
@@ -663,16 +701,19 @@
   async function init() {
     const status = document.getElementById('status');
     try {
-      const [records, horizons] = await Promise.all([
+      const [records, horizons, targetsData] = await Promise.all([
         fetch('/api/captures').then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); }),
         fetch('/api/horizons').then(r => r.json()),
+        fetch('/api/targets').then(r => r.json()),
       ]);
 
       RECORDS = records;
       if (horizons.length) {
         loadHorizonsData(horizons);
       }
-      status.textContent = records.length + ' captures, ' + horizons.length + ' horizon(s) loaded';
+      TARGET_LIST = targetsData.targets || [];
+      for (const t of TARGET_LIST) targetVisibility[t.id] = true;
+      status.textContent = records.length + ' captures, ' + TARGET_LIST.length + ' targets loaded';
       renderCurrentView();
     } catch(e) {
       status.textContent = 'Error: ' + e.message;

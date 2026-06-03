@@ -1,0 +1,8 @@
+{
+  "targets": [
+    {"id": "M13",      "name": "Hercules Cluster",    "ra": 250.42, "dec": 36.46},
+    {"id": "NGC7000",  "name": "North America Neb",   "ra": 314.68, "dec": 44.33},
+    {"id": "NGC6992",  "name": "Eastern Veil",         "ra": 313.08, "dec": 31.72},
+    {"id": "NGC6960",  "name": "Western Veil",         "ra": 311.36, "dec": 30.72}
+  ]
+}
