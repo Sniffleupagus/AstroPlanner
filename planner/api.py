@@ -1,12 +1,14 @@
 """FastAPI application — serves capture data and the static frontend."""
 
 import json
+import logging
 import os
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import yaml
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -14,7 +16,10 @@ from fastapi.staticfiles import StaticFiles
 from planner.scanner import scan_all
 from planner.capture_cache import CaptureCache, find_db
 from planner.horizon_mask import HorizonMask
+from planner.target_resolver import resolve_target
 from planner.visibility import compute_visibility
+
+log = logging.getLogger(__name__)
 
 # 7827 = STAR on a phone keypad
 _ARCHIVE = os.environ.get(
@@ -85,6 +90,38 @@ def get_horizons():
 
 
 _TARGETS_FILE = Path("targets.json")
+_EXTRA_TARGETS_FILE = os.environ.get("ASTROPLANNER_EXTRA_TARGETS", "")
+
+
+def _load_extra_targets() -> list[dict]:
+    """Load targets from a GMNJ-style YAML (list of catalog names) and resolve them."""
+    if not _EXTRA_TARGETS_FILE:
+        return []
+    path = Path(_EXTRA_TARGETS_FILE)
+    if not path.exists():
+        return []
+    try:
+        data = yaml.safe_load(path.read_text())
+        names = data.get("targets", [])
+    except Exception:
+        log.warning("could not read extra targets from %s", path)
+        return []
+
+    if _TARGETS_FILE.exists():
+        with open(_TARGETS_FILE) as f:
+            existing_ids = {t["id"].upper() for t in json.load(f).get("targets", [])}
+    else:
+        existing_ids = set()
+
+    results = []
+    for name in names:
+        if name.strip().upper() in existing_ids:
+            continue
+        try:
+            results.append(resolve_target(name))
+        except ValueError:
+            log.warning("could not resolve extra target %r, skipping", name)
+    return results
 
 
 @app.get("/api/targets")
@@ -97,18 +134,37 @@ def get_targets():
 
 @app.get("/api/visibility")
 def get_visibility(
-    targets: str = Query("all", description="Comma-separated target IDs, or 'all'"),
+    targets: str = Query("all", description="Comma-separated target IDs/names, or 'all'"),
     horizon: Optional[str] = Query(None, description="Horizon filename in masks/"),
     time: Optional[str] = Query(None, description="ISO datetime (default: now UTC)"),
+    extras: bool = Query(True, description="Include extra targets from GMNJ config"),
 ):
-    if not _TARGETS_FILE.exists():
-        return []
-    with open(_TARGETS_FILE) as f:
-        all_targets = json.load(f).get("targets", [])
+    if _TARGETS_FILE.exists():
+        with open(_TARGETS_FILE) as f:
+            known_targets = json.load(f).get("targets", [])
+    else:
+        known_targets = []
 
-    if targets != "all":
-        wanted = {t.strip() for t in targets.split(",")}
-        all_targets = [t for t in all_targets if t["id"] in wanted]
+    known_by_id = {t["id"].upper(): t for t in known_targets}
+
+    if targets == "all":
+        all_targets = list(known_targets)
+        if extras:
+            all_targets.extend(_load_extra_targets())
+    else:
+        all_targets = []
+        for name in targets.split(","):
+            name = name.strip()
+            if not name:
+                continue
+            matched = known_by_id.get(name.upper())
+            if matched:
+                all_targets.append(matched)
+            else:
+                try:
+                    all_targets.append(resolve_target(name))
+                except ValueError as e:
+                    log.warning("skipping unresolvable target %r: %s", name, e)
 
     if horizon:
         mask_path = _MASKS_DIR / horizon
