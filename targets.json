@@ -1,9 +1,34 @@
 {
   "targets": [
-    {"id": "M13",      "name": "Hercules Cluster",    "ra": 250.42, "dec": 36.46},
-    {"id": "NGC7000",  "name": "North America Neb",   "ra": 314.68, "dec": 44.33},
-    {"id": "NGC6992",  "name": "Eastern Veil",         "ra": 313.08, "dec": 31.72},
-    {"id": "NGC6960",  "name": "Western Veil",         "ra": 311.36, "dec": 30.72},
-    {"id": "LDN1235",  "name": "Dark Shark Nebula",    "ra": 331.10, "dec": 73.0347}
+    {
+      "id": "M13",
+      "name": "Hercules Cluster",
+      "ra": 250.42,
+      "dec": 36.46
+    },
+    {
+      "id": "NGC7000",
+      "name": "North America Neb",
+      "ra": 314.68,
+      "dec": 44.33
+    },
+    {
+      "id": "NGC6992",
+      "name": "Eastern Veil",
+      "ra": 313.08,
+      "dec": 31.72
+    },
+    {
+      "id": "LDN1235",
+      "name": "Dark Shark Nebula",
+      "ra": 331.1,
+      "dec": 73.0347
+    },
+    {
+      "id": "IC1396",
+      "name": "Elephant Trunk Nebula",
+      "ra": 324.745,
+      "dec": 57.5139
+    }
   ]
 }
