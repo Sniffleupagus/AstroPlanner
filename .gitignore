@@ -9,6 +9,7 @@ venv/
 
 # Generated outputs
 cache/
+Stack_Work/
 skymap.html
 skymap.png
 masks/*.json
