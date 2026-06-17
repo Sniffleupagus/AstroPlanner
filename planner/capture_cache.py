@@ -9,6 +9,7 @@ Two modes:
 """
 
 import json
+import math
 import os
 import sqlite3
 import subprocess
@@ -41,6 +42,27 @@ CREATE TABLE IF NOT EXISTS captures (
     file_size  INTEGER NOT NULL,
     record_json TEXT NOT NULL
 )
+"""
+
+_CREATE_SUBS = """
+CREATE TABLE IF NOT EXISTS subs (
+    file_path    TEXT PRIMARY KEY,
+    file_mtime   REAL NOT NULL,
+    file_size    INTEGER NOT NULL,
+    ra_deg       REAL NOT NULL,
+    dec_deg      REAL NOT NULL,
+    target       TEXT NOT NULL,
+    scope        TEXT NOT NULL,
+    filter_name  TEXT NOT NULL,
+    exposure_sec REAL NOT NULL,
+    gain         INTEGER NOT NULL,
+    date_obs     TEXT NOT NULL,
+    sub_dir      TEXT NOT NULL
+)
+"""
+
+_CREATE_SUBS_IDX = """
+CREATE INDEX IF NOT EXISTS idx_subs_radec ON subs (ra_deg, dec_deg)
 """
 
 
@@ -76,6 +98,8 @@ class CaptureCache:
             if local:
                 self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute(_CREATE)
+            self._conn.execute(_CREATE_SUBS)
+            self._conn.execute(_CREATE_SUBS_IDX)
             self._conn.commit()
 
     def lookup(self, file_path: str, mtime: float, size: int) -> CaptureRecord | None:
@@ -111,6 +135,72 @@ class CaptureCache:
         self._conn.executemany(
             "DELETE FROM captures WHERE file_path=?", [(p,) for p in paths]
         )
+
+    def lookup_sub(self, file_path: str, mtime: float, size: int) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM subs WHERE file_path=? AND file_mtime=? AND file_size=?",
+            (file_path, mtime, size),
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    def store_sub(self, file_path: str, mtime: float, size: int,
+                  ra_deg: float, dec_deg: float, target: str, scope: str,
+                  filter_name: str, exposure_sec: float, gain: int,
+                  date_obs: str, sub_dir: str) -> None:
+        if self._read_only:
+            raise RuntimeError("cache is read-only")
+        self._conn.execute(
+            """INSERT OR REPLACE INTO subs
+               (file_path, file_mtime, file_size, ra_deg, dec_deg, target,
+                scope, filter_name, exposure_sec, gain, date_obs, sub_dir)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (file_path, mtime, size, ra_deg, dec_deg, target, scope,
+             filter_name, exposure_sec, gain, date_obs, sub_dir),
+        )
+
+    def query_subs(self, ra_center: float, dec_center: float, radius_deg: float,
+                   scope: str | None = None, filter_name: str | None = None,
+                   exposure_sec: float | None = None) -> list[dict]:
+        cos_dec = max(0.01, abs(math.cos(math.radians(dec_center))))
+        ra_lo = ra_center - radius_deg / cos_dec
+        ra_hi = ra_center + radius_deg / cos_dec
+        dec_lo = dec_center - radius_deg
+        dec_hi = dec_center + radius_deg
+
+        sql = "SELECT * FROM subs WHERE dec_deg BETWEEN ? AND ? AND ra_deg BETWEEN ? AND ?"
+        params: list = [dec_lo, dec_hi, ra_lo, ra_hi]
+
+        if scope:
+            sql += " AND scope = ?"
+            params.append(scope)
+        if filter_name:
+            sql += " AND filter_name = ?"
+            params.append(filter_name)
+        if exposure_sec is not None:
+            sql += " AND exposure_sec = ?"
+            params.append(exposure_sec)
+
+        return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
+
+    def sub_paths(self) -> set[str]:
+        rows = self._conn.execute("SELECT file_path FROM subs").fetchall()
+        return {r["file_path"] for r in rows}
+
+    def delete_sub_paths(self, paths: set[str]) -> None:
+        if self._read_only:
+            raise RuntimeError("cache is read-only")
+        self._conn.executemany(
+            "DELETE FROM subs WHERE file_path=?", [(p,) for p in paths]
+        )
+
+    def sub_count(self) -> int:
+        try:
+            row = self._conn.execute("SELECT COUNT(*) as c FROM subs").fetchone()
+            return row["c"]
+        except sqlite3.OperationalError:
+            return 0
 
     def commit(self) -> None:
         if not self._read_only:

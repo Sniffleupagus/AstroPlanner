@@ -257,6 +257,76 @@ def _scan_dwarf_mosaic(mosaic_dir: str, scope_name: str, cache: CaptureCache | N
         return []
 
 
+def scan_seestar_subs(base_path: str, cache: CaptureCache | None = None) -> int:
+    """Index all raw sub .fit files from *_sub directories into the subs table."""
+    sub_dirs = glob.glob(os.path.join(base_path, "*_sub"))
+    total = 0
+    errors = 0
+    skipped = 0
+    batch_size = 500
+
+    for sub_dir in sorted(sub_dirs):
+        fit_files = glob.glob(os.path.join(sub_dir, "Light_*.fit"))
+        if not fit_files:
+            continue
+
+        dir_name = os.path.basename(sub_dir)
+        new_in_dir = 0
+
+        for fpath in fit_files:
+            try:
+                st = os.stat(fpath)
+                if cache is not None:
+                    cached = cache.lookup_sub(fpath, st.st_mtime, st.st_size)
+                    if cached is not None:
+                        skipped += 1
+                        total += 1
+                        continue
+
+                with fits.open(fpath) as hdul:
+                    h = hdul[0].header
+                    ra = h.get("RA")
+                    dec = h.get("DEC")
+                    if ra is None or dec is None:
+                        errors += 1
+                        continue
+
+                    if cache is not None:
+                        cache.store_sub(
+                            file_path=fpath,
+                            mtime=st.st_mtime,
+                            size=st.st_size,
+                            ra_deg=float(ra),
+                            dec_deg=float(dec),
+                            target=h.get("OBJECT", "Unknown"),
+                            scope=h.get("INSTRUME", "Seestar S50"),
+                            filter_name=h.get("FILTER", "Unknown"),
+                            exposure_sec=float(h.get("EXPTIME", h.get("EXPOSURE", 0))),
+                            gain=int(h.get("GAIN", 0)),
+                            date_obs=h.get("DATE-OBS", ""),
+                            sub_dir=sub_dir,
+                        )
+                    new_in_dir += 1
+                    total += 1
+
+                    if cache is not None and total % batch_size == 0:
+                        cache.commit()
+
+            except Exception as e:
+                print(f"  WARN: {fpath}: {e}")
+                errors += 1
+
+        if new_in_dir > 0:
+            print(f"  {dir_name}: {new_in_dir} new")
+            if cache is not None:
+                cache.commit()
+
+    if errors:
+        print(f"  {errors} files skipped (no coords or errors)")
+    print(f"  {skipped} cached, {total - skipped} new, {total} total")
+    return total
+
+
 def scan_all(raid_base: str = "/mnt/zarchive/Pictures/Astrophotography",
              cache: CaptureCache | None = None) -> list[CaptureRecord]:
     records = []
