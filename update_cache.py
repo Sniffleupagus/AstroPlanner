@@ -24,6 +24,7 @@ from planner.scanner import (
     scan_seestar_stacks,
     scan_seestar_subs,
     scan_dwarf_sessions,
+    scan_dwarf_subs,
 )
 
 _DEFAULT_ARCHIVE = "/mnt/zarchive/Pictures/Astrophotography"
@@ -128,9 +129,17 @@ def main():
             print(f"\n{total} capture records cached")
 
         if args.subs or args.subs_only:
-            print("\nScanning Seestar raw subs (this may take a while on first run)...")
-            sub_count = scan_seestar_subs(os.path.join(args.archive, "Seestar"), cache)
-            print(f"\n{sub_count} sub records cached")
+            print("\nScanning Seestar raw subs...")
+            seestar_subs = scan_seestar_subs(os.path.join(args.archive, "Seestar"), cache)
+
+            print("\nScanning Dwarf3 raw subs...")
+            dwarf3_subs = scan_dwarf_subs(os.path.join(args.archive, "Dwarf3"), "Dwarf 3", cache)
+
+            print("\nScanning Dwarf-mini raw subs...")
+            mini_subs = scan_dwarf_subs(os.path.join(args.archive, "Dwarf-mini"), "Dwarf mini", cache)
+
+            sub_total = seestar_subs + dwarf3_subs + mini_subs
+            print(f"\n{sub_total} sub records cached")
 
     print(f"\nDone. DB: {db_path}")
     if not args.local and not args.db and str(local_db_path()) == db_path:
