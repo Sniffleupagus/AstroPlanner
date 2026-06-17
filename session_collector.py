@@ -85,14 +85,25 @@ def symlink_subs(subs: list[dict], work_dir: str, dry_run: bool = False) -> int:
     if not dry_run:
         work.mkdir(parents=True, exist_ok=True)
 
+    existing_targets = set()
+    if not dry_run and work.exists():
+        for p in work.iterdir():
+            if p.is_symlink():
+                existing_targets.add(p.resolve())
+
     linked = 0
+    skipped = 0
     collisions = 0
     for sub in subs:
         src = Path(sub["file_path"])
+
+        if src.resolve() in existing_targets:
+            skipped += 1
+            continue
+
         dst = work / src.name
 
         if dst.exists() or dst.is_symlink():
-            # name collision — append a counter
             stem = src.stem
             suffix = src.suffix
             i = 1
@@ -110,6 +121,8 @@ def symlink_subs(subs: list[dict], work_dir: str, dry_run: bool = False) -> int:
         dst.symlink_to(src)
         linked += 1
 
+    if skipped:
+        print(f"  ({skipped} already linked, skipped)")
     if collisions:
         print(f"  ({collisions} filename collisions resolved with suffix)")
     return linked
