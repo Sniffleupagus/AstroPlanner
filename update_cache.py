@@ -22,6 +22,7 @@ import sys
 from planner.capture_cache import CaptureCache, raid_db_path, local_db_path
 from planner.scanner import (
     scan_seestar_stacks,
+    scan_seestar_subs,
     scan_dwarf_sessions,
 )
 
@@ -67,6 +68,14 @@ def main():
         "--db", metavar="PATH",
         help="Explicit DB path (overrides --local and RAID default)",
     )
+    parser.add_argument(
+        "--subs", action="store_true",
+        help="Also index raw sub exposures (slow first run, ~82k FITS headers)",
+    )
+    parser.add_argument(
+        "--subs-only", action="store_true",
+        help="Only index raw sub exposures, skip stacks",
+    )
     args = parser.parse_args()
 
     if not os.path.isdir(args.archive):
@@ -92,32 +101,40 @@ def main():
     print()
 
     with CaptureCache(db_path, read_only=False) as cache:
-        existing_paths = cache.all_paths()
+        total = 0
 
-        # Scan and populate cache (scanner functions call cache.store() on misses)
-        print("Scanning Seestar stacks...")
-        seestar = scan_seestar_stacks(os.path.join(args.archive, "Seestar"), cache)
-        print(f"  {len(seestar)} records")
+        if not args.subs_only:
+            existing_paths = cache.all_paths()
 
-        print("Scanning Dwarf3 sessions...")
-        dwarf3 = scan_dwarf_sessions(os.path.join(args.archive, "Dwarf3"), "Dwarf 3", cache)
-        print(f"  {len(dwarf3)} records")
+            print("Scanning Seestar stacks...")
+            seestar = scan_seestar_stacks(os.path.join(args.archive, "Seestar"), cache)
+            print(f"  {len(seestar)} records")
 
-        print("Scanning Dwarf-mini sessions...")
-        mini = scan_dwarf_sessions(os.path.join(args.archive, "Dwarf-mini"), "Dwarf mini", cache)
-        print(f"  {len(mini)} records")
+            print("Scanning Dwarf3 sessions...")
+            dwarf3 = scan_dwarf_sessions(os.path.join(args.archive, "Dwarf3"), "Dwarf 3", cache)
+            print(f"  {len(dwarf3)} records")
 
-        # Remove stale entries for files that no longer exist
-        current_files = _collect_all_files(args.archive)
-        stale = existing_paths - current_files
-        if stale:
-            print(f"\nRemoving {len(stale)} stale cache entries")
-            cache.delete_paths(stale)
+            print("Scanning Dwarf-mini sessions...")
+            mini = scan_dwarf_sessions(os.path.join(args.archive, "Dwarf-mini"), "Dwarf mini", cache)
+            print(f"  {len(mini)} records")
 
-    total = len(seestar) + len(dwarf3) + len(mini)
-    print(f"\nDone. {total} total records cached in {db_path}")
+            current_files = _collect_all_files(args.archive)
+            stale = existing_paths - current_files
+            if stale:
+                print(f"\nRemoving {len(stale)} stale capture entries")
+                cache.delete_paths(stale)
+
+            total = len(seestar) + len(dwarf3) + len(mini)
+            print(f"\n{total} capture records cached")
+
+        if args.subs or args.subs_only:
+            print("\nScanning Seestar raw subs (this may take a while on first run)...")
+            sub_count = scan_seestar_subs(os.path.join(args.archive, "Seestar"), cache)
+            print(f"\n{sub_count} sub records cached")
+
+    print(f"\nDone. DB: {db_path}")
     if not args.local and not args.db and str(local_db_path()) == db_path:
-        print(f"\nTo use on another machine, copy to the RAID:")
+        print(f"To use on another machine, copy to the RAID:")
         print(f"  scp {db_path} <nas>:{args.archive}/astroplanner_cache.db")
 
 
