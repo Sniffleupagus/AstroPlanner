@@ -11,10 +11,25 @@ Two modes:
 import json
 import os
 import sqlite3
+import subprocess
 from dataclasses import asdict
 from pathlib import Path
 
 from planner.scanner import CaptureRecord
+
+_NETWORK_FS = {"smb", "smb2", "cifs", "nfs", "nfs4", "fuse.sshfs"}
+
+
+def _is_local_fs(path: Path) -> bool:
+    try:
+        result = subprocess.run(
+            ["stat", "-f", "-c", "%T", str(path)],
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.stdout.strip() not in _NETWORK_FS
+    except Exception:
+        return True
+
 
 _LOCAL_DB = Path(__file__).parent.parent / "cache" / "captures.db"
 _RAID_DB_NAME = "astroplanner_cache.db"
@@ -53,10 +68,13 @@ class CaptureCache:
         self._read_only = read_only
         if not read_only:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-        uri = f"file:{self._path}{'?mode=ro' if read_only else ''}";
-        self._conn = sqlite3.connect(uri, uri=True)
+        uri = f"file:{self._path}{'?mode=ro' if read_only else ''}"
+        local = _is_local_fs(self._path)
+        self._conn = sqlite3.connect(uri, uri=True, timeout=30 if local else 5)
         self._conn.row_factory = sqlite3.Row
         if not read_only:
+            if local:
+                self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute(_CREATE)
             self._conn.commit()
 
