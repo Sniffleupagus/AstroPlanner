@@ -14,6 +14,16 @@ from astropy.io import fits
 if TYPE_CHECKING:
     from planner.capture_cache import CaptureCache
 
+_SCOPE_ALIASES = {
+    "DWARFIII": "DWARF 3",
+    "Dwarf 3": "DWARF 3",
+    "Dwarf mini": "DWARF mini",
+}
+
+
+def _normalize_scope(name: str) -> str:
+    return _SCOPE_ALIASES.get(name, name)
+
 
 @dataclass
 class CaptureRecord:
@@ -299,7 +309,7 @@ def scan_seestar_subs(base_path: str, cache: CaptureCache | None = None) -> int:
                             ra_deg=float(ra),
                             dec_deg=float(dec),
                             target=h.get("OBJECT", "Unknown"),
-                            scope=h.get("INSTRUME", "Seestar S50"),
+                            scope=_normalize_scope(h.get("INSTRUME", "Seestar S50")),
                             filter_name=h.get("FILTER", "Unknown"),
                             exposure_sec=float(h.get("EXPTIME", h.get("EXPOSURE", 0))),
                             gain=int(h.get("GAIN", 0)),
@@ -345,7 +355,7 @@ def scan_dwarf_subs(base_path: str, scope_name: str, cache: CaptureCache | None 
         if entry in ("CALI_FRAME", "DWARF_DARK"):
             continue
 
-        fits_files = glob.glob(os.path.join(entry_path, "*.fits"))
+        fits_files = glob.glob(os.path.join(entry_path, "**", "*.fits"), recursive=True)
         if not fits_files:
             continue
 
@@ -377,7 +387,7 @@ def scan_dwarf_subs(base_path: str, scope_name: str, cache: CaptureCache | None 
                             ra_deg=float(ra),
                             dec_deg=float(dec),
                             target=h.get("OBJECT", "Unknown"),
-                            scope=h.get("INSTRUME", scope_name),
+                            scope=_normalize_scope(h.get("INSTRUME", scope_name)),
                             filter_name=h.get("FILTER", "Unknown"),
                             exposure_sec=float(h.get("EXPTIME", h.get("EXPOSURE", 0))),
                             gain=int(h.get("GAIN", 0)),
@@ -415,12 +425,12 @@ def scan_all(raid_base: str = "/mnt/zarchive/Pictures/Astrophotography",
     records.extend(seestar)
 
     print("Scanning Dwarf3 sessions...")
-    dwarf3 = scan_dwarf_sessions(os.path.join(raid_base, "Dwarf3"), "Dwarf 3", cache)
+    dwarf3 = scan_dwarf_sessions(os.path.join(raid_base, "Dwarf3"), "DWARF 3", cache)
     print(f"  Found {len(dwarf3)} sessions")
     records.extend(dwarf3)
 
     print("Scanning Dwarf-mini sessions...")
-    mini = scan_dwarf_sessions(os.path.join(raid_base, "Dwarf-mini"), "Dwarf mini", cache)
+    mini = scan_dwarf_sessions(os.path.join(raid_base, "Dwarf-mini"), "DWARF mini", cache)
     print(f"  Found {len(mini)} sessions")
     records.extend(mini)
 

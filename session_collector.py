@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from planner.capture_cache import CaptureCache, find_db, local_db_path
+from planner.target_resolver import resolve_target
 
 _DEFAULT_ARCHIVE = "/mnt/zarchive/Pictures/Astrophotography"
 
@@ -225,15 +226,21 @@ def main():
         print(f"Using provided coordinates: RA={ra:.4f}  Dec={dec:.4f}")
     else:
         coords = resolve_target_coords(cache, args.target)
-        if coords is None:
-            print(f"ERROR: Target '{args.target}' not found in captures DB.", file=sys.stderr)
-            print("Available targets matching your query:", file=sys.stderr)
-            for name, count in list_targets(cache, args.target):
-                print(f"  {name}", file=sys.stderr)
-            cache.close()
-            sys.exit(1)
-        ra, dec = coords
-        print(f"Target: {args.target}")
+        if coords is not None:
+            ra, dec = coords
+            print(f"Target: {args.target} (from captures DB)")
+        else:
+            try:
+                resolved = resolve_target(args.target)
+                ra, dec = resolved["ra"], resolved["dec"]
+                print(f"Target: {args.target} (resolved via catalog)")
+            except ValueError:
+                print(f"ERROR: Target '{args.target}' not found in captures DB or catalogs.", file=sys.stderr)
+                print("Available targets matching your query:", file=sys.stderr)
+                for name, count in list_targets(cache, args.target):
+                    print(f"  {name}", file=sys.stderr)
+                cache.close()
+                sys.exit(1)
         print(f"Coordinates: RA={ra:.4f}  Dec={dec:.4f}")
 
     print(f"Search radius: {args.radius}°")
