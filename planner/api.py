@@ -5,12 +5,15 @@ import logging
 import os
 from dataclasses import asdict
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import yaml
+from astropy.io import fits as afits
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from planner.scanner import scan_all
@@ -230,6 +233,103 @@ def serve_root_file(filename: str):
     if not target.is_file():
         raise HTTPException(status_code=404, detail="Not found")
     return FileResponse(str(target))
+
+
+_STACKS_DIR = Path(os.environ.get("ASTROPLANNER_STACKS", "Stack_Work"))
+_STACK_EXTENSIONS = {".fit", ".fits", ".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+
+
+@app.get("/api/stacks")
+def get_stacks():
+    if not _STACKS_DIR.is_dir():
+        return []
+    result = []
+    for subdir in sorted(_STACKS_DIR.iterdir()):
+        if not subdir.is_dir():
+            continue
+        files = []
+        for f in sorted(subdir.iterdir()):
+            if f.is_file() and f.suffix.lower() in _STACK_EXTENSIONS:
+                files.append({
+                    "name": f.name,
+                    "size": f.stat().st_size,
+                    "ext": f.suffix.lower(),
+                })
+        if files:
+            result.append({"dir": subdir.name, "files": files})
+    return result
+
+
+@app.get("/api/stacks/file/{subdir}/{filename}")
+def get_stack_file(subdir: str, filename: str):
+    target = (_STACKS_DIR / subdir / filename).resolve()
+    if not str(target).startswith(str(_STACKS_DIR.resolve())):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+    if target.suffix.lower() not in _STACK_EXTENSIONS:
+        raise HTTPException(status_code=403, detail="File type not allowed")
+    return FileResponse(str(target), filename=filename)
+
+
+def _render_fits(path: Path, max_dim: int = 1600) -> BytesIO:
+    with afits.open(str(path), memmap=True) as hdul:
+        data = hdul[0].data
+
+    if data is None:
+        raise HTTPException(status_code=400, detail="No image data in FITS")
+
+    data = np.array(data, dtype=np.float64)
+    data = np.nan_to_num(data, nan=0.0)
+
+    color = False
+    if data.ndim == 3:
+        if data.shape[0] in (3, 4):
+            data = np.moveaxis(data[:3], 0, -1)
+            color = True
+        elif data.shape[2] in (3, 4):
+            data = data[:, :, :3]
+            color = True
+        else:
+            data = data[0]
+
+    data = np.flipud(data)
+
+    h, w = data.shape[:2]
+    if max(h, w) > max_dim:
+        step = int(np.ceil(max(h, w) / max_dim))
+        data = data[::step, ::step]
+
+    if color:
+        for c in range(data.shape[2]):
+            ch = data[:, :, c]
+            lo, hi = np.percentile(ch, [0.5, 99.5])
+            data[:, :, c] = np.clip((ch - lo) / max(hi - lo, 1e-10), 0, 1)
+    else:
+        lo, hi = np.percentile(data, [0.5, 99.5])
+        data = np.clip((data - lo) / max(hi - lo, 1e-10), 0, 1)
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    buf = BytesIO()
+    plt.imsave(buf, data, format="png", cmap="gray" if not color else None)
+    buf.seek(0)
+    return buf
+
+
+@app.get("/api/stacks/preview/{subdir}/{filename}")
+def get_stack_preview(subdir: str, filename: str):
+    target = (_STACKS_DIR / subdir / filename).resolve()
+    if not str(target).startswith(str(_STACKS_DIR.resolve())):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+    if target.suffix.lower() not in {".fit", ".fits"}:
+        raise HTTPException(status_code=400, detail="Not a FITS file")
+    buf = _render_fits(target)
+    return StreamingResponse(buf, media_type="image/png")
 
 
 # Static SPA — mounted last so /api/* routes always take priority

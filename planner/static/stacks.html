@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stack Work — AstroPlanner</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; width: 100%; }
+    body {
+      background: #0a0a2e; color: #fff; font-family: sans-serif;
+      padding: 12px 16px; overflow-y: auto;
+    }
+    a { color: #4ecdc4; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .header {
+      display: flex; align-items: center; gap: 16px;
+      margin-bottom: 16px; flex-wrap: wrap;
+    }
+    .header h1 { font-size: 22px; }
+    .back { font-size: 16px; }
+
+    .dir-section { margin-bottom: 20px; }
+    .dir-header {
+      cursor: pointer; padding: 10px 14px;
+      background: rgba(255,255,255,0.06); border-radius: 6px;
+      font-size: 18px; display: flex; align-items: center; gap: 10px;
+      user-select: none; transition: background 0.15s;
+    }
+    .dir-header:hover { background: rgba(255,255,255,0.1); }
+    .dir-header .arrow {
+      display: inline-block; transition: transform 0.2s;
+      font-size: 12px; width: 16px; text-align: center;
+    }
+    .dir-header.collapsed .arrow { transform: rotate(-90deg); }
+    .dir-header .count {
+      color: rgba(255,255,255,0.35); font-size: 14px; margin-left: auto;
+    }
+
+    .file-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 12px; padding: 12px 0;
+    }
+    .file-grid.hidden { display: none; }
+
+    .file-card {
+      background: rgba(255,255,255,0.05);
+      border-radius: 6px; overflow: hidden;
+      transition: background 0.15s;
+    }
+    .file-card:hover { background: rgba(255,255,255,0.1); }
+
+    .thumb-wrap {
+      width: 100%; aspect-ratio: 1; background: #000;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; overflow: hidden;
+    }
+    .thumb-wrap img {
+      width: 100%; height: 100%; object-fit: contain;
+    }
+    .thumb-wrap .placeholder {
+      color: rgba(255,255,255,0.2); font-size: 40px;
+    }
+    .thumb-wrap .loading {
+      color: rgba(255,255,255,0.3); font-size: 14px;
+    }
+
+    .info { padding: 8px 10px; font-size: 12px; }
+    .info .name {
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      font-weight: 600; font-size: 13px;
+    }
+    .info .meta {
+      color: rgba(255,255,255,0.35); margin-top: 3px;
+    }
+    .info .actions {
+      margin-top: 6px; display: flex; gap: 12px;
+    }
+    .info .actions a { font-size: 12px; }
+
+    .badge {
+      display: inline-block; padding: 1px 5px; border-radius: 3px;
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      margin-left: 4px; vertical-align: middle;
+    }
+    .badge-fit { background: #a855f7; color: #fff; }
+    .badge-img { background: #4ecdc4; color: #000; }
+
+    #lightbox {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,0.92); z-index: 1000;
+      justify-content: center; align-items: center;
+      flex-direction: column; padding: 16px;
+    }
+    #lightbox.active { display: flex; }
+    #lightbox img {
+      max-width: 95vw; max-height: 85vh; object-fit: contain;
+    }
+    #lightbox .lb-bar {
+      margin-top: 12px; display: flex; gap: 16px;
+      align-items: center; flex-wrap: wrap; justify-content: center;
+    }
+    #lightbox .lb-bar .caption {
+      color: rgba(255,255,255,0.6); font-size: 14px;
+    }
+    #lightbox .lb-bar a {
+      font-size: 14px; padding: 6px 14px;
+      border: 1px solid rgba(255,255,255,0.3); border-radius: 4px;
+      color: #fff; transition: background 0.15s;
+    }
+    #lightbox .lb-bar a:hover {
+      background: rgba(255,255,255,0.1); text-decoration: none;
+    }
+    #lightbox .close-btn {
+      position: absolute; top: 12px; right: 20px;
+      font-size: 36px; color: rgba(255,255,255,0.6); cursor: pointer;
+      background: none; border: none; line-height: 1;
+    }
+    #lightbox .close-btn:hover { color: #fff; }
+    #lightbox .nav-btn {
+      position: absolute; top: 50%; transform: translateY(-50%);
+      font-size: 48px; color: rgba(255,255,255,0.4); cursor: pointer;
+      background: none; border: none; padding: 16px;
+    }
+    #lightbox .nav-btn:hover { color: #fff; }
+    #lightbox .nav-prev { left: 8px; }
+    #lightbox .nav-next { right: 8px; }
+
+    #status {
+      color: rgba(255,255,255,0.3); font-size: 14px; margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <a href="/" class="back">&larr; Sky Map</a>
+    <h1>Stack Work</h1>
+  </div>
+  <div id="content"></div>
+  <div id="status">Loading...</div>
+
+  <div id="lightbox">
+    <button class="close-btn" onclick="closeLightbox()">&times;</button>
+    <button class="nav-btn nav-prev" onclick="navLightbox(-1)">&#8249;</button>
+    <button class="nav-btn nav-next" onclick="navLightbox(1)">&#8250;</button>
+    <img id="lb-img" src="">
+    <div class="lb-bar">
+      <span class="caption" id="lb-caption"></span>
+      <a id="lb-download" href="#" download>Download original</a>
+    </div>
+  </div>
+
+  <script>
+  'use strict';
+
+  let allFiles = [];
+  let lbIndex = -1;
+
+  function fmtSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+    return (bytes / 1073741824).toFixed(2) + ' GB';
+  }
+
+  function viewUrl(dir, file) {
+    const ext = file.ext;
+    if (ext === '.fit' || ext === '.fits')
+      return '/api/stacks/preview/' + encodeURIComponent(dir) + '/' + encodeURIComponent(file.name);
+    return '/api/stacks/file/' + encodeURIComponent(dir) + '/' + encodeURIComponent(file.name);
+  }
+
+  function downloadUrl(dir, file) {
+    return '/api/stacks/file/' + encodeURIComponent(dir) + '/' + encodeURIComponent(file.name);
+  }
+
+  function isFits(ext) { return ext === '.fit' || ext === '.fits'; }
+
+  function openLightbox(idx) {
+    lbIndex = idx;
+    const f = allFiles[idx];
+    const lb = document.getElementById('lightbox');
+    const img = document.getElementById('lb-img');
+    const cap = document.getElementById('lb-caption');
+    const dl = document.getElementById('lb-download');
+
+    img.src = '';
+    cap.textContent = f.dir + ' / ' + f.name + '  (' + fmtSize(f.size) + ')';
+    dl.href = downloadUrl(f.dir, f);
+    dl.download = f.name;
+    lb.classList.add('active');
+
+    img.src = viewUrl(f.dir, f);
+  }
+
+  function closeLightbox(e) {
+    if (e && e.target !== e.currentTarget) return;
+    document.getElementById('lightbox').classList.remove('active');
+    document.getElementById('lb-img').src = '';
+    lbIndex = -1;
+  }
+
+  function navLightbox(delta) {
+    if (lbIndex < 0) return;
+    let next = lbIndex + delta;
+    if (next < 0) next = allFiles.length - 1;
+    if (next >= allFiles.length) next = 0;
+    openLightbox(next);
+  }
+
+  document.addEventListener('keydown', function(e) {
+    if (lbIndex < 0) return;
+    if (e.key === 'Escape') closeLightbox();
+    else if (e.key === 'ArrowLeft') navLightbox(-1);
+    else if (e.key === 'ArrowRight') navLightbox(1);
+  });
+
+  function toggleDir(el) {
+    el.classList.toggle('collapsed');
+    const grid = el.nextElementSibling;
+    grid.classList.toggle('hidden');
+  }
+
+  async function init() {
+    const status = document.getElementById('status');
+    try {
+      const data = await fetch('/api/stacks').then(r => {
+        if (!r.ok) throw new Error(r.statusText);
+        return r.json();
+      });
+
+      if (!data.length) {
+        status.textContent = 'No stacking directories found.';
+        return;
+      }
+
+      allFiles = [];
+      const content = document.getElementById('content');
+      let totalFiles = 0;
+
+      for (const group of data) {
+        const section = document.createElement('div');
+        section.className = 'dir-section';
+
+        const header = document.createElement('div');
+        header.className = 'dir-header';
+        header.onclick = function() { toggleDir(this); };
+        header.innerHTML =
+          '<span class="arrow">&#9660;</span>' +
+          '<span>' + group.dir + '</span>' +
+          '<span class="count">' + group.files.length + ' file' +
+          (group.files.length !== 1 ? 's' : '') + '</span>';
+
+        const grid = document.createElement('div');
+        grid.className = 'file-grid';
+
+        for (const file of group.files) {
+          const globalIdx = allFiles.length;
+          allFiles.push({dir: group.dir, name: file.name, size: file.size, ext: file.ext});
+
+          const card = document.createElement('div');
+          card.className = 'file-card';
+
+          const thumbWrap = document.createElement('div');
+          thumbWrap.className = 'thumb-wrap';
+          thumbWrap.onclick = (function(i) { return function() { openLightbox(i); }; })(globalIdx);
+
+          const img = document.createElement('img');
+          img.loading = 'lazy';
+          img.alt = file.name;
+          img.src = viewUrl(group.dir, file);
+
+          thumbWrap.appendChild(img);
+
+          const badgeClass = isFits(file.ext) ? 'badge-fit' : 'badge-img';
+          const badgeLabel = file.ext.replace('.', '');
+
+          const info = document.createElement('div');
+          info.className = 'info';
+          info.innerHTML =
+            '<div class="name" title="' + file.name + '">' + file.name + '</div>' +
+            '<div class="meta">' + fmtSize(file.size) +
+            ' <span class="badge ' + badgeClass + '">' + badgeLabel + '</span></div>' +
+            '<div class="actions">' +
+            '<a href="' + viewUrl(group.dir, file) + '" target="_blank">Open</a>' +
+            '<a href="' + downloadUrl(group.dir, file) + '" download="' + file.name + '">Download</a>' +
+            '</div>';
+
+          card.appendChild(thumbWrap);
+          card.appendChild(info);
+          grid.appendChild(card);
+          totalFiles++;
+        }
+
+        section.appendChild(header);
+        section.appendChild(grid);
+        content.appendChild(section);
+      }
+
+      status.textContent = data.length + ' directories, ' + totalFiles + ' files';
+    } catch(e) {
+      status.textContent = 'Error: ' + e.message;
+      console.error(e);
+    }
+  }
+
+  init();
+  </script>
+</body>
+</html>
