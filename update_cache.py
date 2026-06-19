@@ -112,11 +112,11 @@ def main():
             print(f"  {len(seestar)} records")
 
             print("Scanning Dwarf3 sessions...")
-            dwarf3 = scan_dwarf_sessions(os.path.join(args.archive, "Dwarf3"), "Dwarf 3", cache)
+            dwarf3 = scan_dwarf_sessions(os.path.join(args.archive, "Dwarf3"), "DWARF 3", cache)
             print(f"  {len(dwarf3)} records")
 
             print("Scanning Dwarf-mini sessions...")
-            mini = scan_dwarf_sessions(os.path.join(args.archive, "Dwarf-mini"), "Dwarf mini", cache)
+            mini = scan_dwarf_sessions(os.path.join(args.archive, "Dwarf-mini"), "DWARF mini", cache)
             print(f"  {len(mini)} records")
 
             current_files = _collect_all_files(args.archive)
@@ -133,10 +133,10 @@ def main():
             seestar_subs = scan_seestar_subs(os.path.join(args.archive, "Seestar"), cache)
 
             print("\nScanning Dwarf3 raw subs...")
-            dwarf3_subs = scan_dwarf_subs(os.path.join(args.archive, "Dwarf3"), "Dwarf 3", cache)
+            dwarf3_subs = scan_dwarf_subs(os.path.join(args.archive, "Dwarf3"), "DWARF 3", cache)
 
             print("\nScanning Dwarf-mini raw subs...")
-            mini_subs = scan_dwarf_subs(os.path.join(args.archive, "Dwarf-mini"), "Dwarf mini", cache)
+            mini_subs = scan_dwarf_subs(os.path.join(args.archive, "Dwarf-mini"), "DWARF mini", cache)
 
             sub_total = seestar_subs + dwarf3_subs + mini_subs
             print(f"\n{sub_total} sub records cached")
