@@ -18,11 +18,12 @@ def _format_exposure(seconds: float) -> str:
 def build_skymap_png(records: list[CaptureRecord], output_path: str = "skymap.png",
                      ra_range: tuple[float, float] | None = None,
                      dec_range: tuple[float, float] | None = None):
-    scope_styles = {
-        "Seestar S50": ("#4ecdc4", "o"),
-        "Dwarf 3": ("#ff6b6b", "s"),
-        "Dwarf mini": ("#ffd93d", "D"),
-    }
+    _palette = ["#4ecdc4", "#ff6b6b", "#ffd93d", "#a855f7",
+                "#f97316", "#06b6d4", "#84cc16", "#ec4899"]
+    _markers = ["o", "s", "D", "^", "v", "P", "*", "X"]
+    scopes = sorted({r.scope for r in records if r.scope})
+    scope_styles = {s: (_palette[i % len(_palette)], _markers[i % len(_markers)])
+                    for i, s in enumerate(scopes)}
 
     fig, ax = plt.subplots(figsize=(18, 8), facecolor="#0a0a2e")
     ax.set_facecolor("#0a0a2e")

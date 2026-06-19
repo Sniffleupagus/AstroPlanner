@@ -153,11 +153,10 @@ setInterval(refresh,300000);
 def build_skymap(records: list[CaptureRecord], output_path: str = "skymap.html",
                  horizon_mask_path: str = None, lat: float = None,
                  lon: float = None):
-    scope_colors = {
-        "Seestar S50": "#4ecdc4",
-        "Dwarf 3": "#ff6b6b",
-        "Dwarf mini": "#ffd93d",
-    }
+    _palette = ["#4ecdc4", "#ff6b6b", "#ffd93d", "#a855f7",
+                "#f97316", "#06b6d4", "#84cc16", "#ec4899"]
+    scopes = sorted({r.scope for r in records if r.scope})
+    scope_colors = {s: _palette[i % len(_palette)] for i, s in enumerate(scopes)}
 
     fig = go.Figure()
 

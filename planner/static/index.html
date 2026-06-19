@@ -60,11 +60,17 @@
   'use strict';
 
   // ── Constants ─────────────────────────────────────────────────────────────
-  const SCOPE_COLORS = {
-    'Seestar S50': '#4ecdc4',
-    'Dwarf 3':     '#ff6b6b',
-    'Dwarf mini':  '#ffd93d',
-  };
+  const SCOPE_PALETTE = [
+    '#4ecdc4', '#ff6b6b', '#ffd93d', '#a855f7',
+    '#f97316', '#06b6d4', '#84cc16', '#ec4899',
+  ];
+
+  function scopeColors(records) {
+    const scopes = [...new Set(records.map(r => r.scope).filter(Boolean))].sort();
+    const map = {};
+    scopes.forEach((s, i) => { map[s] = SCOPE_PALETTE[i % SCOPE_PALETTE.length]; });
+    return map;
+  }
 
   const D2R = Math.PI/180, R2D = 180/Math.PI;
   const NR = 180, ND = 90;
@@ -225,7 +231,8 @@
       (byScope[r.scope] = byScope[r.scope] || []).push(r);
     }
     const traces = [];
-    for (const [scope, color] of Object.entries(SCOPE_COLORS)) {
+    const colors = scopeColors(records);
+    for (const [scope, color] of Object.entries(colors)) {
       const recs = byScope[scope];
       if (!recs || !recs.length) continue;
       const maxExp = Math.max(...recs.map(r => r.total_exposure_sec), 1);
@@ -536,7 +543,8 @@
     }
 
     const newTraces = [];
-    for (const [scope, color] of Object.entries(SCOPE_COLORS)) {
+    const colors = scopeColors(RECORDS);
+    for (const [scope, color] of Object.entries(colors)) {
       const recs = byScope[scope];
       if (!recs || !recs.length) continue;
       let maxExp = 1;
