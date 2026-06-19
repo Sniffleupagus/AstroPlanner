@@ -29,6 +29,18 @@
       "name": "Elephant Trunk Nebula",
       "ra": 324.745,
       "dec": 57.5139
+    },
+    {
+      "id": "M51",
+      "name": "Whirlpool Galaxy",
+      "ra": 202.4696,
+      "dec": 47.1953
+    },
+    {
+      "id": "M101",
+      "name": "Pinwheel Galaxy",
+      "ra": 210.8024,
+      "dec": 54.3488
     }
   ]
 }
