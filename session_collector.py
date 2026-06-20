@@ -8,12 +8,14 @@ WORK_DIR for Siril stacking.
 Usage:
   python session_collector.py "M 13" /tmp/m13_stack
   python session_collector.py "M 13" /tmp/m13_stack --filter IRCUT --radius 1.0
+  python session_collector.py "M 13" /tmp/m13_stack --copy
   python session_collector.py "M 13" /tmp/m13_stack --dry-run
 """
 
 import argparse
 import math
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -80,8 +82,9 @@ def collect_subs(cache: CaptureCache, ra: float, dec: float, radius_deg: float,
     return [s for s in subs if angular_distance(ra, dec, s["ra_deg"], s["dec_deg"]) <= radius_deg]
 
 
-def symlink_subs(subs: list[dict], work_dir: str, dry_run: bool = False) -> int:
-    """Create symlinks for all matched subs into work_dir/lights/. Returns count."""
+def symlink_subs(subs: list[dict], work_dir: str, dry_run: bool = False,
+                 copy: bool = False) -> int:
+    """Create symlinks (or copies) for all matched subs into work_dir/lights/. Returns count."""
     work = Path(work_dir) / "lights"
     if not dry_run:
         work.mkdir(parents=True, exist_ok=True)
@@ -91,6 +94,8 @@ def symlink_subs(subs: list[dict], work_dir: str, dry_run: bool = False) -> int:
         for p in work.iterdir():
             if p.is_symlink():
                 existing_targets.add(p.resolve())
+            elif p.is_file() and copy:
+                existing_targets.add((p.name, p.stat().st_size))
 
     linked = 0
     skipped = 0
@@ -98,9 +103,18 @@ def symlink_subs(subs: list[dict], work_dir: str, dry_run: bool = False) -> int:
     for sub in subs:
         src = Path(sub["file_path"])
 
-        if src.resolve() in existing_targets:
-            skipped += 1
-            continue
+        if copy:
+            try:
+                src_size = src.stat().st_size
+            except OSError:
+                src_size = None
+            if (src.name, src_size) in existing_targets:
+                skipped += 1
+                continue
+        else:
+            if src.resolve() in existing_targets:
+                skipped += 1
+                continue
 
         dst = work / src.name
 
@@ -119,11 +133,15 @@ def symlink_subs(subs: list[dict], work_dir: str, dry_run: bool = False) -> int:
             linked += 1
             continue
 
-        dst.symlink_to(src)
+        if copy:
+            shutil.copy2(src, dst)
+        else:
+            dst.symlink_to(src)
         linked += 1
 
+    verb = "copied" if copy else "linked"
     if skipped:
-        print(f"  ({skipped} already linked, skipped)")
+        print(f"  ({skipped} already {verb}, skipped)")
     if collisions:
         print(f"  ({collisions} filename collisions resolved with suffix)")
     return linked
@@ -180,6 +198,10 @@ def main():
     parser.add_argument(
         "--random", action="store_true",
         help="Randomly sample --count images instead of taking the first N",
+    )
+    parser.add_argument(
+        "--copy", action="store_true",
+        help="Copy files instead of symlinking (slower up front, faster stacking)",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -292,10 +314,12 @@ def main():
         print("\nNo WORK_DIR specified — showing summary only.")
         return
 
-    action = "Would link" if args.dry_run else "Linking"
+    verb = "copy" if args.copy else "link"
+    action = f"Would {verb}" if args.dry_run else (f"Copying" if args.copy else "Linking")
     print(f"\n{action} {len(subs)} files into {args.work_dir}")
-    linked = symlink_subs(subs, args.work_dir, dry_run=args.dry_run)
-    print(f"{'Would create' if args.dry_run else 'Created'} {linked} symlinks")
+    linked = symlink_subs(subs, args.work_dir, dry_run=args.dry_run, copy=args.copy)
+    noun = "copies" if args.copy else "symlinks"
+    print(f"{'Would create' if args.dry_run else 'Created'} {linked} {noun}")
 
 
 if __name__ == "__main__":

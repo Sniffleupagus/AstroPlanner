@@ -267,22 +267,41 @@ def _scan_dwarf_mosaic(mosaic_dir: str, scope_name: str, cache: CaptureCache | N
         return []
 
 
+def _read_seestar_sub_header(fpath: str) -> dict | None:
+    try:
+        h = fits.getheader(fpath, 0)
+        ra = h.get("RA")
+        dec = h.get("DEC")
+        if ra is None or dec is None:
+            return None
+        return {
+            "ra_deg": float(ra),
+            "dec_deg": float(dec),
+            "target": h.get("OBJECT", "Unknown"),
+            "scope": _normalize_scope(h.get("INSTRUME", "Seestar S50")),
+            "filter_name": h.get("FILTER", "Unknown"),
+            "exposure_sec": float(h.get("EXPTIME", h.get("EXPOSURE", 0))),
+            "gain": int(h.get("GAIN", 0)),
+            "date_obs": h.get("DATE-OBS", ""),
+        }
+    except Exception:
+        return None
+
+
 def scan_seestar_subs(base_path: str, cache: CaptureCache | None = None) -> int:
     """Index all raw sub .fit files from *_sub directories into the subs table."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     sub_dirs = glob.glob(os.path.join(base_path, "*_sub"))
     total = 0
     errors = 0
     skipped = 0
     batch_size = 500
 
+    uncached: list[tuple[str, float, int, str]] = []
+
     for sub_dir in sorted(sub_dirs):
         fit_files = glob.glob(os.path.join(sub_dir, "Light_*.fit"))
-        if not fit_files:
-            continue
-
-        dir_name = os.path.basename(sub_dir)
-        new_in_dir = 0
-
         for fpath in fit_files:
             try:
                 st = os.stat(fpath)
@@ -292,53 +311,79 @@ def scan_seestar_subs(base_path: str, cache: CaptureCache | None = None) -> int:
                         skipped += 1
                         total += 1
                         continue
+                uncached.append((fpath, st.st_mtime, st.st_size, sub_dir))
+            except Exception as e:
+                print(f"  WARN: {fpath}: {e}")
+                errors += 1
 
-                with fits.open(fpath) as hdul:
-                    h = hdul[0].header
-                    ra = h.get("RA")
-                    dec = h.get("DEC")
-                    if ra is None or dec is None:
-                        errors += 1
-                        continue
+    print(f"  {skipped} cached, {len(uncached)} to scan")
 
-                    if cache is not None:
-                        cache.store_sub(
-                            file_path=fpath,
-                            mtime=st.st_mtime,
-                            size=st.st_size,
-                            ra_deg=float(ra),
-                            dec_deg=float(dec),
-                            target=h.get("OBJECT", "Unknown"),
-                            scope=_normalize_scope(h.get("INSTRUME", "Seestar S50")),
-                            filter_name=h.get("FILTER", "Unknown"),
-                            exposure_sec=float(h.get("EXPTIME", h.get("EXPOSURE", 0))),
-                            gain=int(h.get("GAIN", 0)),
-                            date_obs=h.get("DATE-OBS", ""),
-                            sub_dir=sub_dir,
-                        )
-                    new_in_dir += 1
-                    total += 1
+    new_count = 0
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {
+            pool.submit(_read_seestar_sub_header, fpath): (fpath, mtime, size, sub_dir)
+            for fpath, mtime, size, sub_dir in uncached
+        }
 
-                    if cache is not None and total % batch_size == 0:
-                        cache.commit()
+        for future in as_completed(futures):
+            fpath, mtime, size, sub_dir = futures[future]
+            try:
+                result = future.result()
+                if result is None:
+                    errors += 1
+                    continue
+
+                if cache is not None:
+                    cache.store_sub(
+                        file_path=fpath, mtime=mtime, size=size,
+                        sub_dir=sub_dir, **result,
+                    )
+                new_count += 1
+                total += 1
+
+                if cache is not None and new_count % batch_size == 0:
+                    cache.commit()
+                    print(f"  ... {new_count}/{len(uncached)} scanned")
 
             except Exception as e:
                 print(f"  WARN: {fpath}: {e}")
                 errors += 1
 
-        if new_in_dir > 0:
-            print(f"  {dir_name}: {new_in_dir} new")
-            if cache is not None:
-                cache.commit()
+    if cache is not None:
+        cache.commit()
 
     if errors:
         print(f"  {errors} files skipped (no coords or errors)")
-    print(f"  {skipped} cached, {total - skipped} new, {total} total")
+    print(f"  {skipped} cached, {new_count} new, {total} total")
     return total
+
+
+def _read_dwarf_sub_header(args: tuple[str, str]) -> dict | None:
+    fpath, scope_name = args
+    try:
+        h = fits.getheader(fpath, 0)
+        ra = h.get("RA")
+        dec = h.get("DEC")
+        if ra is None or dec is None:
+            return None
+        return {
+            "ra_deg": float(ra),
+            "dec_deg": float(dec),
+            "target": h.get("OBJECT", "Unknown"),
+            "scope": _normalize_scope(h.get("INSTRUME", scope_name)),
+            "filter_name": h.get("FILTER", "Unknown"),
+            "exposure_sec": float(h.get("EXPTIME", h.get("EXPOSURE", 0))),
+            "gain": int(h.get("GAIN", 0)),
+            "date_obs": h.get("DATE-OBS", ""),
+        }
+    except Exception:
+        return None
 
 
 def scan_dwarf_subs(base_path: str, scope_name: str, cache: CaptureCache | None = None) -> int:
     """Index raw sub .fits files from Dwarf session directories into the subs table."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     astro_dir = os.path.join(base_path, "Astronomy")
     if not os.path.isdir(astro_dir):
         return 0
@@ -348,6 +393,8 @@ def scan_dwarf_subs(base_path: str, scope_name: str, cache: CaptureCache | None 
     skipped = 0
     batch_size = 500
 
+    uncached: list[tuple[str, float, int, str]] = []
+
     for entry in sorted(os.listdir(astro_dir)):
         entry_path = os.path.join(astro_dir, entry)
         if not os.path.isdir(entry_path):
@@ -356,12 +403,11 @@ def scan_dwarf_subs(base_path: str, scope_name: str, cache: CaptureCache | None 
             continue
 
         fits_files = glob.glob(os.path.join(entry_path, "**", "*.fits"), recursive=True)
-        if not fits_files:
-            continue
-
-        new_in_dir = 0
-
         for fpath in fits_files:
+            basename = os.path.basename(fpath)
+            if basename.startswith(("stacked", "failed_")):
+                continue
+
             try:
                 st = os.stat(fpath)
                 if cache is not None:
@@ -370,48 +416,50 @@ def scan_dwarf_subs(base_path: str, scope_name: str, cache: CaptureCache | None 
                         skipped += 1
                         total += 1
                         continue
+                uncached.append((fpath, st.st_mtime, st.st_size, entry_path))
+            except Exception as e:
+                print(f"  WARN: {fpath}: {e}")
+                errors += 1
 
-                with fits.open(fpath) as hdul:
-                    h = hdul[0].header
-                    ra = h.get("RA")
-                    dec = h.get("DEC")
-                    if ra is None or dec is None:
-                        errors += 1
-                        continue
+    print(f"  {skipped} cached, {len(uncached)} to scan")
 
-                    if cache is not None:
-                        cache.store_sub(
-                            file_path=fpath,
-                            mtime=st.st_mtime,
-                            size=st.st_size,
-                            ra_deg=float(ra),
-                            dec_deg=float(dec),
-                            target=h.get("OBJECT", "Unknown"),
-                            scope=_normalize_scope(h.get("INSTRUME", scope_name)),
-                            filter_name=h.get("FILTER", "Unknown"),
-                            exposure_sec=float(h.get("EXPTIME", h.get("EXPOSURE", 0))),
-                            gain=int(h.get("GAIN", 0)),
-                            date_obs=h.get("DATE-OBS", ""),
-                            sub_dir=entry_path,
-                        )
-                    new_in_dir += 1
-                    total += 1
+    new_count = 0
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {
+            pool.submit(_read_dwarf_sub_header, (fpath, scope_name)): (fpath, mtime, size, entry_path)
+            for fpath, mtime, size, entry_path in uncached
+        }
 
-                    if cache is not None and total % batch_size == 0:
-                        cache.commit()
+        for future in as_completed(futures):
+            fpath, mtime, size, entry_path = futures[future]
+            try:
+                result = future.result()
+                if result is None:
+                    errors += 1
+                    continue
+
+                if cache is not None:
+                    cache.store_sub(
+                        file_path=fpath, mtime=mtime, size=size,
+                        sub_dir=entry_path, **result,
+                    )
+                new_count += 1
+                total += 1
+
+                if cache is not None and new_count % batch_size == 0:
+                    cache.commit()
+                    print(f"  ... {new_count}/{len(uncached)} scanned")
 
             except Exception as e:
                 print(f"  WARN: {fpath}: {e}")
                 errors += 1
 
-        if new_in_dir > 0:
-            print(f"  {entry}: {new_in_dir} new")
-            if cache is not None:
-                cache.commit()
+    if cache is not None:
+        cache.commit()
 
     if errors:
         print(f"  {errors} files skipped (no coords or errors)")
-    print(f"  {skipped} cached, {total - skipped} new, {total} total")
+    print(f"  {skipped} cached, {new_count} new, {total} total")
     return total
 
 

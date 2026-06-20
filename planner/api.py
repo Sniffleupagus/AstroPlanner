@@ -339,8 +339,7 @@ def get_stack_preview(
     if target.suffix.lower() not in {".fit", ".fits"}:
         raise HTTPException(status_code=400, detail="Not a FITS file")
     buf = _render_fits(target, stretch_sigma=sigma, stretch_softness=softness)
-    return StreamingResponse(buf, media_type="image/png",
-                             headers={"Cache-Control": "no-store"})
+    return StreamingResponse(buf, media_type="image/png")
 
 
 # Static SPA — mounted last so /api/* routes always take priority
