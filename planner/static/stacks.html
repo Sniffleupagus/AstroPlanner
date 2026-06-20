@@ -96,7 +96,7 @@
     }
     #lightbox.active { display: flex; }
     #lightbox img {
-      max-width: 95vw; max-height: 85vh; object-fit: contain;
+      max-width: 95vw; max-height: 78vh; object-fit: contain;
     }
     #lightbox .lb-bar {
       margin-top: 12px; display: flex; gap: 16px;
@@ -112,6 +112,30 @@
     }
     #lightbox .lb-bar a:hover {
       background: rgba(255,255,255,0.1); text-decoration: none;
+    }
+    .stretch-controls {
+      display: flex; gap: 20px; align-items: center; flex-wrap: wrap;
+      justify-content: center; margin-top: 8px; width: 100%;
+    }
+    .stretch-controls label {
+      color: rgba(255,255,255,0.7); font-size: 13px;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .stretch-controls input[type=range] {
+      width: 140px; accent-color: #4ecdc4; cursor: pointer;
+    }
+    .stretch-controls .val {
+      color: #4ecdc4; font-size: 13px; min-width: 32px;
+      font-variant-numeric: tabular-nums;
+    }
+    .stretch-controls button {
+      font-size: 12px; padding: 3px 10px;
+      border: 1px solid rgba(255,255,255,0.25); border-radius: 4px;
+      background: transparent; color: rgba(255,255,255,0.6);
+      cursor: pointer; transition: background 0.15s;
+    }
+    .stretch-controls button:hover {
+      background: rgba(255,255,255,0.1); color: #fff;
     }
     #lightbox .close-btn {
       position: absolute; top: 12px; right: 20px;
@@ -149,6 +173,17 @@
     <div class="lb-bar">
       <span class="caption" id="lb-caption"></span>
       <a id="lb-download" href="#" download>Download original</a>
+      <div class="stretch-controls" id="stretch-controls" style="display:none">
+        <label>Sigma
+          <input type="range" id="sl-sigma" min="3" max="200" step="1" value="25">
+          <span class="val" id="val-sigma">25</span>
+        </label>
+        <label>Lift
+          <input type="range" id="sl-soft" min="0" max="100" step="1" value="66">
+          <span class="val" id="val-soft">0.100</span>
+        </label>
+        <button id="btn-reset-stretch">Reset</button>
+      </div>
     </div>
   </div>
 
@@ -157,6 +192,10 @@
 
   let allFiles = [];
   let lbIndex = -1;
+  let curSigma = 25;
+  let curSoftness = 0.1;
+  const DEFAULT_SIGMA = 25;
+  const DEFAULT_SOFTNESS = 0.1;
 
   function fmtSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
@@ -165,10 +204,14 @@
     return (bytes / 1073741824).toFixed(2) + ' GB';
   }
 
-  function viewUrl(dir, file) {
+  function viewUrl(dir, file, sigma, softness) {
     const ext = file.ext;
-    if (ext === '.fit' || ext === '.fits')
-      return '/api/stacks/preview/' + encodeURIComponent(dir) + '/' + encodeURIComponent(file.name);
+    if (ext === '.fit' || ext === '.fits') {
+      let url = '/api/stacks/preview/' + encodeURIComponent(dir) + '/' + encodeURIComponent(file.name);
+      if (sigma !== undefined)
+        url += '?sigma=' + sigma + '&softness=' + softness;
+      return url;
+    }
     return '/api/stacks/file/' + encodeURIComponent(dir) + '/' + encodeURIComponent(file.name);
   }
 
@@ -185,6 +228,7 @@
     const img = document.getElementById('lb-img');
     const cap = document.getElementById('lb-caption');
     const dl = document.getElementById('lb-download');
+    const controls = document.getElementById('stretch-controls');
 
     img.src = '';
     cap.textContent = f.dir + ' / ' + f.name + '  (' + fmtSize(f.size) + ')';
@@ -192,7 +236,13 @@
     dl.download = f.name;
     lb.classList.add('active');
 
-    img.src = viewUrl(f.dir, f);
+    const fits = isFits(f.ext);
+    controls.style.display = fits ? 'flex' : 'none';
+    if (fits) {
+      img.src = viewUrl(f.dir, f, curSigma, curSoftness);
+    } else {
+      img.src = viewUrl(f.dir, f);
+    }
   }
 
   function closeLightbox(e) {
@@ -305,6 +355,61 @@
       console.error(e);
     }
   }
+
+  (function setupStretchControls() {
+    const slSigma = document.getElementById('sl-sigma');
+    const slSoft = document.getElementById('sl-soft');
+    const valSigma = document.getElementById('val-sigma');
+    const valSoft = document.getElementById('val-soft');
+    const btnReset = document.getElementById('btn-reset-stretch');
+    let debounceTimer = null;
+
+    // Log scale: slider 0–100 maps to 0.001–0.2
+    var SOFT_MIN = 0.001, SOFT_MAX = 0.2;
+    var LOG_MIN = Math.log(SOFT_MIN), LOG_MAX = Math.log(SOFT_MAX);
+    function softSliderToValue(v) {
+      return Math.exp(LOG_MIN + (v / 100) * (LOG_MAX - LOG_MIN));
+    }
+    function softValueToSlider(s) {
+      return Math.round(100 * (Math.log(s) - LOG_MIN) / (LOG_MAX - LOG_MIN));
+    }
+
+    function updateDisplay() {
+      valSigma.textContent = curSigma;
+      valSoft.textContent = curSoftness < 0.01 ? curSoftness.toFixed(3) : curSoftness.toFixed(2);
+    }
+
+    function reloadPreview() {
+      if (lbIndex < 0) return;
+      const f = allFiles[lbIndex];
+      if (!isFits(f.ext)) return;
+      document.getElementById('lb-img').src = viewUrl(f.dir, f, curSigma, curSoftness);
+    }
+
+    function onSliderChange() {
+      curSigma = parseInt(slSigma.value);
+      curSoftness = softSliderToValue(parseInt(slSoft.value));
+      updateDisplay();
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(reloadPreview, 300);
+    }
+
+    slSigma.addEventListener('input', onSliderChange);
+    slSoft.addEventListener('input', onSliderChange);
+
+    btnReset.addEventListener('click', function() {
+      curSigma = DEFAULT_SIGMA;
+      curSoftness = DEFAULT_SOFTNESS;
+      slSigma.value = curSigma;
+      slSoft.value = softValueToSlider(curSoftness);
+      updateDisplay();
+      reloadPreview();
+    });
+
+    slSigma.value = curSigma;
+    slSoft.value = softValueToSlider(curSoftness);
+    updateDisplay();
+  })();
 
   init();
   </script>

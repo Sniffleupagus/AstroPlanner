@@ -272,7 +272,8 @@ def get_stack_file(subdir: str, filename: str):
     return FileResponse(str(target), filename=filename)
 
 
-def _render_fits(path: Path, max_dim: int = 1600) -> BytesIO:
+def _render_fits(path: Path, max_dim: int = 1600,
+                  stretch_sigma: float = 25, stretch_softness: float = 0.1) -> BytesIO:
     with afits.open(str(path), memmap=True) as hdul:
         data = hdul[0].data
 
@@ -300,14 +301,19 @@ def _render_fits(path: Path, max_dim: int = 1600) -> BytesIO:
         step = int(np.ceil(max(h, w) / max_dim))
         data = data[::step, ::step]
 
+    def _asinh_stretch(arr):
+        bg = np.median(arr)
+        mad = np.median(np.abs(arr - bg))
+        sig = mad * 1.4826
+        arr = np.clip((arr - bg) / max(stretch_sigma * sig, 1e-10), 0, 1)
+        arr = np.arcsinh(arr / stretch_softness) / np.arcsinh(1.0 / stretch_softness)
+        return arr
+
     if color:
         for c in range(data.shape[2]):
-            ch = data[:, :, c]
-            lo, hi = np.percentile(ch, [0.5, 99.5])
-            data[:, :, c] = np.clip((ch - lo) / max(hi - lo, 1e-10), 0, 1)
+            data[:, :, c] = _asinh_stretch(data[:, :, c])
     else:
-        lo, hi = np.percentile(data, [0.5, 99.5])
-        data = np.clip((data - lo) / max(hi - lo, 1e-10), 0, 1)
+        data = _asinh_stretch(data)
 
     import matplotlib
     matplotlib.use("Agg")
@@ -320,7 +326,11 @@ def _render_fits(path: Path, max_dim: int = 1600) -> BytesIO:
 
 
 @app.get("/api/stacks/preview/{subdir}/{filename}")
-def get_stack_preview(subdir: str, filename: str):
+def get_stack_preview(
+    subdir: str, filename: str,
+    sigma: float = Query(25, description="White-point in sky-sigma units"),
+    softness: float = Query(0.1, description="Asinh softness (lower = more lift)"),
+):
     target = (_STACKS_DIR / subdir / filename).resolve()
     if not str(target).startswith(str(_STACKS_DIR.resolve())):
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -328,8 +338,9 @@ def get_stack_preview(subdir: str, filename: str):
         raise HTTPException(status_code=404, detail="Not found")
     if target.suffix.lower() not in {".fit", ".fits"}:
         raise HTTPException(status_code=400, detail="Not a FITS file")
-    buf = _render_fits(target)
-    return StreamingResponse(buf, media_type="image/png")
+    buf = _render_fits(target, stretch_sigma=sigma, stretch_softness=softness)
+    return StreamingResponse(buf, media_type="image/png",
+                             headers={"Cache-Control": "no-store"})
 
 
 # Static SPA — mounted last so /api/* routes always take priority
