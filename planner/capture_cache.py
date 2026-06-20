@@ -67,12 +67,12 @@ CREATE INDEX IF NOT EXISTS idx_subs_radec ON subs (ra_deg, dec_deg)
 
 
 def find_db(archive_base: str) -> Path | None:
-    """Return path to an existing DB: RAID copy first, then local fallback."""
+    """Return path to an existing DB: local first, then RAID fallback."""
+    if _LOCAL_DB.exists():
+        return _LOCAL_DB
     raid = Path(archive_base) / _RAID_DB_NAME
     if raid.exists():
         return raid
-    if _LOCAL_DB.exists():
-        return _LOCAL_DB
     return None
 
 
