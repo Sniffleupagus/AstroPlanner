@@ -22,13 +22,15 @@
       "id": "LDN1235",
       "name": "Dark Shark Nebula",
       "ra": 331.1,
-      "dec": 73.0347
+      "dec": 73.0347,
+      "when": "Early August"
     },
     {
       "id": "IC1396",
       "name": "Elephant Trunk Nebula",
       "ra": 324.745,
-      "dec": 57.5139
+      "dec": 57.5139,
+      "when": "Late July"
     },
     {
       "id": "M51",
@@ -41,6 +43,79 @@
       "name": "Pinwheel Galaxy",
       "ra": 210.8024,
       "dec": 54.3488
+    },
+    {
+      "id": "M16",
+      "name": "Eagle Nebula",
+      "ra": 274.688,
+      "dec": -13.792
+    },
+    {
+      "id": "Rhoophiuchi",
+      "name": "Rho ophiuchi",
+      "ra": 246.3963,
+      "dec": -23.4472
+    },
+    {
+      "id": "M27",
+      "name": "Dumbbell Nebula",
+      "ra": 299.9015,
+      "dec": 22.7212
+    },
+    {
+      "id": "Albireo",
+      "name": "Albireo",
+      "ra": 292.6803,
+      "dec": 27.9597
+    },
+    {
+      "id": "IC1848",
+      "name": "Soul Nebula",
+      "ra": 42.855,
+      "dec": 60.4189,
+      "when": "September"
+    },
+    {
+      "id": "NGC6888",
+      "name": "Crescent Nebula",
+      "ra": 303.0273,
+      "dec": 38.3549,
+      "when": "Late June"
+    },
+    {
+      "id": "CocoonNebula",
+      "name": "Cocoon Nebula",
+      "ra": 328.372,
+      "dec": 47.246,
+      "when": "July"
+    },
+    {
+      "id": "Barnard150",
+      "name": "Seahorse Nebula",
+      "ra": 312.775,
+      "dec": 60.1833,
+      "when": "July"
+    },
+    {
+      "id": "IC342",
+      "name": "Hidden Galaxy",
+      "ra": 56.7021,
+      "dec": 68.0961,
+      "when": "probably not until october"
+    },
+    {
+      "id": "NGC7789",
+      "name": "Caroline's Rose",
+      "ra": 359.3342,
+      "dec": 56.7261,
+      "when": "probably august"
+    },
+    {
+      "id": "SH2-129",
+      "name": "Flying Bat and Squid",
+      "ra": 317.95,
+      "dec": 59.95,
+      "when": "probably july"
     }
   ]
 }
