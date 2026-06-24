@@ -296,6 +296,7 @@ def main():
 
     # summarize what we found
     from collections import Counter
+    by_scope = Counter(s["scope"] for s in subs)
     by_target = Counter(s["target"] for s in subs)
     by_filter = Counter(s["filter_name"] for s in subs)
     by_exp = Counter(s["exposure_sec"] for s in subs)
@@ -305,6 +306,7 @@ def main():
     if args.count and args.count < total_available:
         selected_msg = f" (selected {len(subs)} {'random' if args.random else 'first'} of {total_available})"
     print(f"\nFound {total_available} matching subs{selected_msg}:")
+    print(f"   Scopes:   {dict(by_scope)}")
     print(f"  Targets:   {dict(by_target)}")
     print(f"  Filters:   {dict(by_filter)}")
     print(f"  Exposures: { {f'{k}s': v for k, v in by_exp.items()} }")
