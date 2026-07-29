@@ -83,7 +83,7 @@
       "when": "Late June"
     },
     {
-      "id": "CocoonNebula",
+      "id": "IC 5146",
       "name": "Cocoon Nebula",
       "ra": 328.372,
       "dec": 47.246,
@@ -116,6 +116,30 @@
       "ra": 317.95,
       "dec": 59.95,
       "when": "probably july"
+    },
+    {
+      "id": "NGC3310",
+      "name": "NGC 3310/SuperNova ",
+      "ra": 159.6911,
+      "dec": 53.5033
+    },
+    {
+      "id": "M31",
+      "name": "Andromeda Galaxy",
+      "ra": 10.6847,
+      "dec": 41.2687
+    },
+    {
+      "id": "M42",
+      "name": "Orion Nebula",
+      "ra": 83.8201,
+      "dec": -5.3876
+    },
+    {
+      "id": "IC443",
+      "name": "Jellyfish Nebula",
+      "ra": 94.25,
+      "dec": 22.57
     }
   ]
 }
