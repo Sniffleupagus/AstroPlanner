@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from astropy.coordinates import EarthLocation, AltAz, SkyCoord
+import math
+from astropy.coordinates import EarthLocation, AltAz, SkyCoord, get_sun
 from astropy.time import Time
 import astropy.units as u
 
@@ -27,6 +28,7 @@ SETTLE_THRESHOLD_ALT = 0.5  # degrees
 SETTLE_THRESHOLD_AZ = 4.2   # degrees — looser for sidereal tracking drift
 SLEW_POLL_INTERVAL = 4.0
 SLEW_STALL_TIMEOUT = 20.0  # give up only if no progress for this long
+SUN_AVOIDANCE_DEG = 60.0   # minimum angular distance from the sun
 
 
 def _compass(az_deg):
@@ -298,6 +300,22 @@ class FrameStream:
             pass
 
 
+def _sun_altaz(location, obstime):
+    """Return the sun's (alt_deg, az_deg) for the given location and time."""
+    frame = AltAz(obstime=obstime, location=location)
+    sun = get_sun(obstime).transform_to(frame)
+    return sun.alt.deg, sun.az.deg
+
+
+def _altaz_separation(alt1, az1, alt2, az2):
+    """Angular separation in degrees between two alt/az positions."""
+    a1, z1 = math.radians(alt1), math.radians(az1)
+    a2, z2 = math.radians(alt2), math.radians(az2)
+    cos_d = (math.sin(a1) * math.sin(a2)
+             + math.cos(a1) * math.cos(a2) * math.cos(z1 - z2))
+    return math.degrees(math.acos(max(-1.0, min(1.0, cos_d))))
+
+
 def altaz_to_radec(alt_deg, az_deg, location, obstime):
     """Convert alt/az to RA/Dec for goto commands.
 
@@ -507,6 +525,14 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
     def _check_alt(alt, label=""):
         nonlocal obstime, gain, exposure_ms
         obstime = Time.now()
+
+        sun_alt, sun_az = _sun_altaz(location, obstime)
+        if sun_alt > -5:
+            sun_dist = _altaz_separation(alt, az_deg, sun_alt, sun_az)
+            if sun_dist < SUN_AVOIDANCE_DEG:
+                print(f"        ☀ Sun too close ({sun_dist:.0f}° away) — skipping")
+                return {"is_sky": None, "sun_avoided": True}
+
         ra_h, dec_d = altaz_to_radec(alt, az_deg, location, obstime)
 
         # Slew to target
@@ -543,6 +569,10 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
 
     result = _check_alt(current, "start")
 
+    if result.get("sun_avoided"):
+        print(f"      → Sun too close at this azimuth — skipping")
+        return None, gain, exposure_ms
+
     if result.get("failed"):
         print(f"      → Cannot get frame at starting altitude — skipping azimuth")
         return None, gain, exposure_ms
@@ -555,7 +585,7 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
             current -= step_size
             current = max(current, alt_min)
             result = _check_alt(current, "stepping down")
-            if result.get("failed"):
+            if result.get("failed") or result.get("sun_avoided"):
                 continue
             if not result["is_sky"]:
                 # Found obstruction. Boundary is one step above.
@@ -576,7 +606,7 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
             current = min(current, alt_max)
             step_num += 1
             result = _check_alt(current, f"step up #{step_num}")
-            if result.get("failed"):
+            if result.get("failed") or result.get("sun_avoided"):
                 sky_streak = 0
                 continue
             if result["is_sky"]:
@@ -610,7 +640,7 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
             time.sleep(2)
             current = alt_max
             result = _check_alt(current, "retry from top")
-            if result.get("failed"):
+            if result.get("failed") or result.get("sun_avoided"):
                 print(f"      → Frame capture failed at top with gain {gain}")
                 continue
             if result["is_sky"]:
@@ -620,7 +650,7 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
                     current -= step_size
                     current = max(current, alt_min)
                     result = _check_alt(current, "stepping down (gain adjusted)")
-                    if result.get("failed"):
+                    if result.get("failed") or result.get("sun_avoided"):
                         break
                     if not result["is_sky"]:
                         boundary = current + step_size
@@ -770,15 +800,23 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
 
     scope_time = scope.get_time()
     print(f"  Scope time: {scope_time}")
+
+    obstime_now = Time.now()
+    sun_alt, sun_az = _sun_altaz(location, obstime_now)
+    if sun_alt > -5:
+        print(f"  Sun: Alt {sun_alt:.1f}° Az {sun_az:.0f}° ({_compass(sun_az)}) "
+              f"— avoiding pointings within {SUN_AVOIDANCE_DEG:.0f}°")
+    else:
+        print(f"  Sun: below horizon ({sun_alt:.1f}°) — no avoidance needed")
     print()
 
-    # Start camera in scenery mode (enables RTSP for fast frame capture)
-    print("Starting camera in scenery mode (RTSP)...")
-    scope.start_view(mode="scenery")
+    # Start camera in moon mode (enables RTSP while keeping EQ mount,
+    # so scope_goto correctly interprets RA/Dec coordinates)
+    print("Starting camera in moon mode (RTSP + EQ tracking)...")
+    scope.start_view(mode="moon")
     time.sleep(4)
 
-    # One-time autofocus for scenery (star focus is wrong for nearby objects)
-    print("  Running autofocus for scenery mode...")
+    print("  Autofocus...")
     #scope._send("start_auto_focuse")
     #time.sleep(8)
     print(f"  Sky detection: blue_ratio + variance (auto-exposed video)")
@@ -960,7 +998,7 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
     # Stop stream and view session
     print("Shutting down camera session...")
     stream.stop()
-    scope.stop_view(mode="scenery")
+    scope.stop_view(mode="moon")
 
     total_elapsed = time.time() - scan_start
     print()
