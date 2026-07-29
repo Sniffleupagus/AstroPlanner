@@ -5,12 +5,12 @@ at each azimuth, producing a horizon mask for the AstroPlanner recommender.
 """
 
 import json
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 from astropy.coordinates import EarthLocation, AltAz, SkyCoord
 from astropy.time import Time
 import astropy.units as u
@@ -97,14 +97,15 @@ class SeestarScope:
             return resp["result"]
         return None
 
-    def start_view(self, ra_hours=None, dec_deg=None, name="_horizon_scan"):
+    def start_view(self, ra_hours=None, dec_deg=None, name="_horizon_scan",
+                   mode="star"):
         """Start a view session.
 
-        If ra_hours/dec_deg are None, goes straight to ContinuousExposure
-        (no plate-solve). Otherwise triggers AutoGoto first.
+        mode can be "star", "scenery", "moon", or "sun".
+        Scenery/moon/sun modes enable RTSP on port 4554.
         """
         params = {
-            "mode": "star",
+            "mode": mode,
             "target_name": name,
             "lp_filter": False,
         }
@@ -137,8 +138,8 @@ class SeestarScope:
         print(f"        ⚠ Goto failed after 5 retries (scope kept reporting busy)")
         return resp
 
-    def stop_view(self):
-        self._send("iscope_stop_view", {"mode": "star"})
+    def stop_view(self, mode="star"):
+        self._send("iscope_stop_view", {"mode": mode})
 
     def get_time(self):
         """Get scope's current time as a datetime."""
@@ -150,6 +151,151 @@ class SeestarScope:
             return datetime(r["year"], r["mon"], r["day"],
                            r["hour"], r["min"], r["sec"], tzinfo=tz)
         return datetime.now(timezone.utc)
+
+
+class FrameStream:
+    """RTSP frame grabber using a single persistent connection.
+
+    A reader thread keeps the buffer drained and stashes the latest
+    frame. wait_for_new_frame() returns it instantly. If the reader
+    detects the stream died, it reconnects automatically. Only one
+    RTSP connection is ever open (the Seestar appears to allow only one).
+
+    Requires the Seestar to be in scenery/moon/sun mode.
+    """
+
+    RTSP_PORT = 4554
+
+    def __init__(self, host=DEFAULT_HOST):
+        import cv2
+        self._cv2 = cv2
+        self._host = host
+        self._url = f"rtsp://{host}:{self.RTSP_PORT}/stream"
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._frame = None
+        self._frame_time = 0.0
+        self._cap = cv2.VideoCapture(self._url, cv2.CAP_FFMPEG)
+        if not self._cap.isOpened():
+            raise RuntimeError(f"Cannot open RTSP stream at {self._url}")
+        self._reader_thread = threading.Thread(
+            target=self._reader, daemon=True)
+        self._reader_thread.start()
+
+    def _reader(self):
+        cv2 = self._cv2
+        last_save = 0
+        fail_count = 0
+        while not self._stop.is_set():
+            cap = self._cap
+            if cap is None or not cap.isOpened():
+                fail_count += 1
+                if fail_count > 3:
+                    self._stop.wait(2)
+                    fail_count = 0
+                try:
+                    self._cap = cv2.VideoCapture(self._url, cv2.CAP_FFMPEG)
+                except Exception:
+                    self._stop.wait(2)
+                continue
+            ret, frame = cap.read()
+            if not ret:
+                fail_count += 1
+                if fail_count > 5:
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+                    self._cap = None
+                    fail_count = 0
+                continue
+            fail_count = 0
+            now = time.time()
+            with self._lock:
+                self._frame = frame
+                self._frame_time = now
+            if now - last_save >= 1.0:
+                try:
+                    cv2.imwrite("live_scan.jpg", frame,
+                                [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    last_save = now
+                except Exception:
+                    pass
+
+    def wait_for_new_frame(self, timeout=10.0, verbose=True):
+        """Return the latest frame from the reader thread.
+
+        Returns (pixels, header-dict) or (None, None).
+        """
+        t0 = time.time()
+        deadline = t0 + timeout
+
+        while time.time() < deadline:
+            with self._lock:
+                if self._frame is not None:
+                    age = time.time() - self._frame_time
+                    if age < 3.0:
+                        frame = self._frame.copy()
+                        h, w = frame.shape[:2]
+                        elapsed = time.time() - t0
+                        if verbose:
+                            print(f"        📷 RTSP frame: {w}x{h} "
+                                  f"({elapsed:.2f}s)")
+                        return frame, {"width": w, "height": h}
+            time.sleep(0.2)
+
+        if verbose:
+            print(f"        📷 ⚠ No RTSP frame in {timeout:.0f}s")
+        return None, None
+
+    def annotate_and_save(self, frame, alt, az, result, path="live_scan.jpg"):
+        """Save frame with classification overlay text."""
+        cv2 = self._cv2
+        img = frame.copy()
+        h, w = img.shape[:2]
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = w / 600.0
+        thick = max(1, int(scale * 2))
+        outline = max(1, int(scale * 4))
+
+        verdict = "SKY" if result.get("is_sky") else "OBSTRUCTION"
+        blue = result.get("blue_ratio")
+        var = result.get("variance")
+        lines = [
+            f"Alt {alt:.0f}  Az {az:.0f} ({_compass(az)})",
+            verdict,
+        ]
+        if blue is not None:
+            lines.append(f"blue={blue:.3f} var={var:.4f}")
+
+        y = int(h * 0.45)
+        for line in lines:
+            sz = cv2.getTextSize(line, font, scale, thick)[0]
+            x = (w - sz[0]) // 2
+            cv2.putText(img, line, (x, y), font, scale, (0, 0, 0), outline)
+            cv2.putText(img, line, (x, y), font, scale, (255, 255, 255), thick)
+            y += int(sz[1] * 1.8)
+
+        cv2.imwrite(path, img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+    @property
+    def latest_jpeg(self):
+        """Return the latest frame as JPEG bytes, or None."""
+        with self._lock:
+            if self._frame is not None:
+                _, buf = self._cv2.imencode('.jpg', self._frame,
+                                            [self._cv2.IMWRITE_JPEG_QUALITY, 80])
+                return buf.tobytes()
+        return None
+
+    def stop(self):
+        self._stop.set()
+        self._reader_thread.join(timeout=5)
+        try:
+            if self._cap is not None:
+                self._cap.release()
+        except Exception:
+            pass
 
 
 def altaz_to_radec(alt_deg, az_deg, location, obstime):
@@ -312,12 +458,17 @@ def _log_classify(result, alt, az, context=""):
     """Print a human-readable summary of a frame classification."""
     is_sky = result.get("is_sky")
     bright = result.get("brightness", 0)
-    bright_frac = result.get("bright_fraction", 0)
-    dark_frac = result.get("dark_fraction", 0)
-    verdict = "SKY ☀" if is_sky else "OBSTRUCTION ■"
+    verdict = "SKY" if is_sky else "OBSTRUCTION"
     ctx = f" {context}" if context else ""
-    print(f"        Frame{ctx} → {verdict}  "
-          f"mean={bright:.2f}  bright={bright_frac:.1%}  dark={dark_frac:.1%}")
+    blue = result.get("blue_ratio")
+    var = result.get("variance")
+    if blue is not None:
+        print(f"        Frame{ctx} -> {verdict}  "
+              f"mean={bright:.2f}  blue={blue:.3f}  var={var:.4f}")
+    else:
+        bright_frac = result.get("bright_fraction", 0)
+        print(f"        Frame{ctx} -> {verdict}  "
+              f"mean={bright:.2f}  bright={bright_frac:.1%}")
 
 
 def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
@@ -325,7 +476,8 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
                   start_alt=None, confirm_count=2,
                   sky_bright=DEFAULT_SKY_BRIGHT,
                   sky_fraction=DEFAULT_SKY_FRACTION,
-                  gain=None, exposure_ms=10):
+                  gain=None, exposure_ms=10,
+                  stream=None):
     """Find the sky/obstruction boundary by stepping up from a starting altitude.
 
     Uses small incremental steps (no big jumps) to avoid triggering meridian
@@ -346,12 +498,9 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
     def _save_preview(pixels):
         """Save current frame to horizon_scan.jpg for monitoring."""
         try:
-            if pixels.dtype == np.uint16:
-                img8 = (pixels / 256).astype(np.uint8)
-            else:
-                img8 = pixels
-            pil_img = Image.fromarray(img8, mode="RGB")
-            pil_img.save("horizon_scan.jpg", quality=85)
+            import cv2 as _cv2
+            _cv2.imwrite("horizon_scan.jpg", pixels,
+                         [_cv2.IMWRITE_JPEG_QUALITY, 85])
         except Exception:
             pass
 
@@ -359,14 +508,6 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
         nonlocal obstime, gain, exposure_ms
         obstime = Time.now()
         ra_h, dec_d = altaz_to_radec(alt, az_deg, location, obstime)
-
-        # Grab reference frame before slewing (to detect when it changes)
-        try:
-            ref_frame = capture_frame(host, wait_for_new=False, timeout=5,
-                                      verbose=False)
-            ref_hash = ref_frame.tobytes()[:4096]
-        except Exception:
-            ref_hash = None
 
         # Slew to target
         scope.goto(ra_h, dec_d, target_alt=alt, target_az=az_deg)
@@ -382,96 +523,22 @@ def find_boundary(scope, az_deg, location, obstime, host=DEFAULT_HOST,
                                  thresh_az=SETTLE_THRESHOLD_AZ * 2):
                 print(f"        ⚠ Retry slew still not settled, continuing anyway")
 
-        # Get a fresh frame from this position.
-        # If camera is stuck (no new frame after slew), it's likely overwhelmed
-        # from prior overexposure. Reduce gain, re-slew, retry.
-        pixels = None
-        max_stuck_retries = 5
-        for stuck_attempt in range(max_stuck_retries):
-            deadline = time.time() + 45.0
-            fetch_attempts = 0
-            got_fresh = False
-            while time.time() < deadline:
-                try:
-                    frame = capture_frame(host, wait_for_new=False, timeout=5,
-                                          verbose=False)
-                except Exception as e:
-                    fetch_attempts += 1
-                    print(f"        Frame grab failed: {e} (retry {fetch_attempts})")
-                    time.sleep(2)
-                    continue
-                fetch_attempts += 1
-                if ref_hash is None or frame.tobytes()[:4096] != ref_hash:
-                    pixels = frame
-                    got_fresh = True
-                    break
-                if fetch_attempts == 1:
-                    print(f"        📷 Waiting for fresh frame...", end="", flush=True)
-                elif fetch_attempts % 5 == 0:
-                    print(f" {fetch_attempts}s...", end="", flush=True)
-                time.sleep(1)
+        # Let auto-exposure settle after slew
+        time.sleep(1)
 
-            if got_fresh:
-                break
-
-            # Camera stuck — reduce exposure and/or gain, re-slew, try again
-            adjustments = []
-            if exposure_ms > 1:
-                exposure_ms -= 1
-                scope._send("set_setting", {"exp_ms": {"continuous": exposure_ms}})
-                adjustments.append(f"exposure→{exposure_ms}ms")
-            if gain is not None and gain > 1:
-                gain -= 10 if gain > 10 else 1
-                scope._send("set_control_value", ["gain", gain])
-                adjustments.append(f"gain→{gain}")
-            if adjustments:
-                print(f"\n        ⚠ Camera stuck — reducing {', '.join(adjustments)}, re-slewing")
-            else:
-                print(f"\n        ⚠ Camera stuck, gain and exposure at minimum — re-slewing")
-            time.sleep(3)
-            obstime = Time.now()
-            ra_h, dec_d = altaz_to_radec(alt, az_deg, location, obstime)
-            scope.goto(ra_h, dec_d, target_alt=alt, target_az=az_deg)
-            time.sleep(2)
-            wait_for_slew(scope, az_deg, alt)
-            ref_hash = None
-        else:
-            print(f"        ⚠ Could not get fresh frame after "
-                  f"{max_stuck_retries} retries")
+        # Grab frame from RTSP stream (reader thread keeps buffer drained)
+        pixels, _hdr = stream.wait_for_new_frame(timeout=10.0)
 
         if pixels is None:
             print(f"        ⚠ No frame obtained — cannot classify")
             return {"is_sky": None, "failed": True}
 
-        # Classify the frame
-        bright = pixels.mean() / (65535.0 if pixels.dtype == np.uint16 else 255.0)
-        wait_note = f" (attempt {fetch_attempts})" if fetch_attempts > 1 else ""
-        print(f"        📷 Fresh frame captured (mean={bright:.2f}){wait_note}")
-
         result = classify_frame(pixels, sky_bright=sky_bright,
-                                   sky_fraction=sky_fraction)
+                                sky_fraction=sky_fraction)
         _save_preview(pixels)
+        stream.annotate_and_save(pixels, alt, az_deg, result,
+                                 path="horizon_scan.jpg")
         _log_classify(result, alt, az_deg, label)
-
-        # If nearly saturated and uniformly bright, preemptively reduce gain
-        # for the next capture — camera will likely get stuck otherwise.
-        if (bright > 0.95 and result.get("bright_fraction", 0) >= 1.0
-                and gain is not None and gain > 1):
-            gain -= 10 if gain > 10 else 1
-            if exposure_ms > 1:
-                exposure_ms -= 1
-                scope._send("set_setting", {"exp_ms": {"continuous": exposure_ms}})
-            print(f"        💡 Nearly saturated — reducing gain to {gain}, "
-                  f"exposure to {exposure_ms}ms for next capture")
-            scope._send("set_control_value", ["gain", gain])
-        elif (bright < 0.75 and result.get("bright_fraction", 0) >= 1.0
-                and gain is not None and gain < 220):
-            gain += 5
-            exposure_ms += 1
-            print(f"        💡 Dim Sky — increasing gain to {gain}, "
-                  f"exposure to {exposure_ms}ms for next capture")
-            scope._send("set_control_value", ["gain", gain])
-            scope._send("set_setting", {"exp_ms": {"continuous": exposure_ms}})
         return result
 
     result = _check_alt(current, "start")
@@ -588,13 +655,15 @@ def _load_existing_boundaries(output_path):
             raw_alt = entry["min_altitude"] - old_margin
             boundaries[entry["azimuth"]] = max(raw_alt, 0)
         return boundaries, old_margin
-    except (json.JSONDecodeError, KeyError):
-        return {}, None
+    except (json.JSONDecodeError, KeyError) as e:
+        print(f"  ⚠ WARNING: Cannot parse {output_path}: {e}")
+        print(f"  ⚠ Existing data will NOT be merged. Fix or remove the file to proceed.")
+        raise SystemExit(1)
 
 
 def _save_boundaries(boundaries, margin, lat, lon, coarse_step, fine_step,
                      output_path):
-    """Write the current boundary state to the output JSON."""
+    """Write the current boundary state to the output JSON atomically."""
     mask_data = {
         "location": {"lat": lat, "lon": lon},
         "generated": datetime.now(timezone.utc).isoformat(),
@@ -609,8 +678,17 @@ def _save_boundaries(boundaries, margin, lat, lon, coarse_step, fine_step,
     }
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w") as f:
+    tmp_path = out_path.with_suffix(".tmp")
+    with open(tmp_path, "w") as f:
         json.dump(mask_data, f, indent=2)
+        f.flush()
+        import os
+        os.fsync(f.fileno())
+    if out_path.exists():
+        bak_path = out_path.with_suffix(".bak")
+        bak_path.unlink(missing_ok=True)
+        out_path.rename(bak_path)
+    tmp_path.rename(out_path)
     return mask_data
 
 
@@ -694,17 +772,22 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
     print(f"  Scope time: {scope_time}")
     print()
 
-    # Start camera and configure gain/exposure
-    print("Starting camera...")
-    scope.start_view()
-    time.sleep(3)
-    scope._send("set_control_value", ["gain", gain])
-    scope._send("set_setting", {"exp_ms": {"continuous": exposure_ms}})
-    time.sleep(1)
-    print(f"  Camera: gain={gain}, exposure={exposure_ms}ms")
-    print(f"  Sky detection: >{sky_fraction:.0%} of pixels must be brighter than {sky_bright}")
-    print(f"  Tip: increase --gain or --exposure if sky doesn't fully saturate")
-    print(f"  Preview: watch horizon_scan.jpg for the latest captured frame")
+    # Start camera in scenery mode (enables RTSP for fast frame capture)
+    print("Starting camera in scenery mode (RTSP)...")
+    scope.start_view(mode="scenery")
+    time.sleep(4)
+
+    # One-time autofocus for scenery (star focus is wrong for nearby objects)
+    print("  Running autofocus for scenery mode...")
+    #scope._send("start_auto_focuse")
+    #time.sleep(8)
+    print(f"  Sky detection: blue_ratio + variance (auto-exposed video)")
+    print(f"  Preview: watch horizon_scan.jpg (annotated) and live_scan.jpg (raw)")
+    print()
+
+    # Open RTSP stream with reader thread
+    stream = FrameStream(host)
+    print(f"  RTSP stream connected (rtsp://{host}:4554/stream)")
     print()
 
     # Start with existing data and merge new readings on top
@@ -763,7 +846,8 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
                                        start_alt=prev_boundary,
                                        sky_bright=sky_bright,
                                        sky_fraction=sky_fraction,
-                                       gain=gain, exposure_ms=exposure_ms)
+                                       gain=gain, exposure_ms=exposure_ms,
+                                       stream=stream)
         if boundary is None:
             failed_azimuths.append((az, direction, "could not determine boundary"))
             print(f"    ✗ Azimuth {az:.0f}° ({direction}): FAILED — skipping")
@@ -796,12 +880,24 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
         else:
             print("  Pass 2: Skipped (single azimuth mode)")
     else:
+        def _az_in_scan_range(az):
+            """Check if an azimuth falls within the requested scan range."""
+            if az_start is None:
+                return True
+            s = az_start
+            e = az_end if az_end is not None else (az_start + 360.0) % 360
+            if s <= e:
+                return s <= az <= e
+            return az >= s or az <= e
+
         coarse_sorted = sorted(boundaries.keys())
         fine_azimuths = []
         refine_regions = []
         for i in range(len(coarse_sorted)):
             az1 = coarse_sorted[i]
             az2 = coarse_sorted[(i + 1) % len(coarse_sorted)]
+            if not (_az_in_scan_range(az1) and _az_in_scan_range(az2)):
+                continue
             diff = abs(boundaries[az1] - boundaries[az2])
             if diff > refine_threshold:
                 refine_regions.append((az1, az2, diff))
@@ -811,7 +907,7 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
                 else:
                     fill = np.arange(az1 + step, az1 + (360 - az1 + az2), step) % 360
                 for az in fill:
-                    if az not in boundaries:
+                    if az not in boundaries and _az_in_scan_range(az):
                         fine_azimuths.append(az)
 
         if fine_azimuths:
@@ -837,7 +933,8 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
                                                start_alt=hint,
                                                sky_bright=sky_bright,
                                                sky_fraction=sky_fraction,
-                                               gain=gain, exposure_ms=exposure_ms)
+                                               gain=gain, exposure_ms=exposure_ms,
+                                               stream=stream)
                 if boundary is None:
                     failed_azimuths.append((az, direction, "could not determine boundary"))
                     print(f"    ✗ Azimuth {az:.1f}° ({direction}): FAILED — skipping")
@@ -854,13 +951,16 @@ def scan_horizon(host=DEFAULT_HOST, coarse_step=15.0, fine_step=5.0,
             print("  Pass 2: Skipped (horizon is smooth between all coarse samples)")
     print()
 
-    # Stop view session
-    print("Shutting down camera session...")
-    scope.stop_view()
-
-    # Final save
+    # Final save before cleanup (incremental saves already ran, but capture
+    # any pass-2 stragglers and ensure the file is current before we touch
+    # the camera — cleanup has historically segfaulted in OpenCV)
     mask_data = _save_boundaries(boundaries, margin, lat, lon, coarse_step,
                                  fine_step, output_path)
+
+    # Stop stream and view session
+    print("Shutting down camera session...")
+    stream.stop()
+    scope.stop_view(mode="scenery")
 
     total_elapsed = time.time() - scan_start
     print()
