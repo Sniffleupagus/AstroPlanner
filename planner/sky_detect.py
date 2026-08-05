@@ -13,8 +13,8 @@ import numpy as np
 
 
 DEFAULT_SKY_BRIGHT = 0.8
-DEFAULT_SKY_FRACTION = 0.95
-DEFAULT_BLUE_RATIO = 0.40
+DEFAULT_SKY_FRACTION = 0.92
+DEFAULT_BLUE_RATIO = 0.50
 DEFAULT_MAX_VARIANCE = 0.01
 
 
@@ -72,12 +72,18 @@ def classify_frame(pixels: np.ndarray,
     dark_frac = (norm < 0.3).mean()
 
     total = b + g + r + 1e-6
-    blue_ratio = (b / total).mean()
+    pixel_blue_ratio = b / total
+    blue_ratio = float(pixel_blue_ratio.mean())
+
+    # Per-pixel sky test: blue must be the dominant channel AND exceed
+    # the minimum blue ratio.  Foliage has G >> B so these pixels fail.
+    sky_pixel = (b > g) & (b > r) & (pixel_blue_ratio >= blue_ratio_thresh)
+    sky_pixel_frac = float(sky_pixel.mean())
 
     gray = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
     variance = float(gray.var())
 
-    is_sky = blue_ratio >= blue_ratio_thresh and variance < max_variance
+    is_sky = sky_pixel_frac >= sky_fraction and variance < max_variance
 
     return {
         "is_sky": is_sky,
@@ -85,6 +91,7 @@ def classify_frame(pixels: np.ndarray,
         "bright_fraction": bright_frac,
         "dark_fraction": dark_frac,
         "blue_ratio": blue_ratio,
+        "sky_pixel_frac": sky_pixel_frac,
         "variance": variance,
         "sky_bright": sky_bright,
         "sky_fraction": sky_fraction,
