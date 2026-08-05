@@ -180,6 +180,19 @@
     return dt.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
   }
 
+  function wrapAzLines(azArr, altArr, hoverArr) {
+    const wAz = [], wAlt = [], wHov = [];
+    for (const off of [-360, 0, 360]) {
+      if (wAz.length) { wAz.push(null); wAlt.push(null); wHov.push(''); }
+      for (let i = 0; i < azArr.length; i++) {
+        wAz.push(azArr[i] !== null ? azArr[i] + off : null);
+        wAlt.push(altArr[i]);
+        wHov.push(hoverArr[i]);
+      }
+    }
+    return {az: wAz, alt: wAlt, hover: wHov};
+  }
+
   function hexToRgba(hex, alpha) {
     const r = parseInt(hex.slice(1,3), 16);
     const g = parseInt(hex.slice(3,5), 16);
@@ -214,9 +227,17 @@
     title: { text: 'Horizon View', font: { size: 24 } },
     xaxis: {
       title: { text: 'Azimuth', font: { size: 18 } },
-      range: [0, 360], dtick: 45,
-      ticktext: ['N','NE','E','SE','S','SW','W','NW','N'],
-      tickvals: [0, 45, 90, 135, 180, 225, 270, 315, 360],
+      range: [0, 360],
+      ticktext: (function() {
+        const d = ['N','NE','E','SE','S','SW','W','NW'], t = [];
+        for (let v = -360; v <= 720; v += 45) t.push(d[((v % 360 + 360) % 360) / 45]);
+        return t;
+      })(),
+      tickvals: (function() {
+        const t = [];
+        for (let v = -360; v <= 720; v += 45) t.push(v);
+        return t;
+      })(),
       tickfont: { size: 16 },
       gridcolor: 'rgba(255,255,255,0.1)',
     },
@@ -341,7 +362,7 @@
     const now = new Date();
     const pts = [];
     let nowIdx = -1;
-    for (let m = -720; m <= 720; m += 2) {
+    for (let m = -1440; m <= 1440; m += 2) {
       const dt = new Date(now.getTime() + m * 60000);
       const L = lst(dt);
       const aa = rd2aa(ra, dec, L);
@@ -367,8 +388,8 @@
       const startOff = ws - transitIdx;
       const endOff = we - transitIdx;
       activeWindow = {
-        start: Math.max(0, nowIdx + startOff),
-        end: Math.min(pts.length - 1, nowIdx + endOff)
+        start: Math.max(0, nowIdx - endOff),
+        end: Math.min(pts.length - 1, nowIdx - startOff)
       };
     }
 
@@ -376,6 +397,7 @@
     const dimAz = [], dimAlt = [], dimHover = [];
     let prevAz = null;
     let prevState = null;
+    let azOffset = 0;
 
     function makeHover(p) {
       return name + '<br>' +
@@ -383,42 +405,34 @@
         cardinalDir(p.az) + ' Az ' + p.az.toFixed(1) + '° Alt ' + p.alt.toFixed(1) + '°';
     }
 
-    function addGap() {
-      if (visAz.length && visAz[visAz.length - 1] !== null) {
-        visAz.push(null); visAlt.push(null); visHover.push('');
-      }
-      if (dimAz.length && dimAz[dimAz.length - 1] !== null) {
-        dimAz.push(null); dimAlt.push(null); dimHover.push('');
-      }
-    }
-
     for (let i = 0; i < pts.length; i++) {
       const p = pts[i];
 
       if (prevAz !== null && Math.abs(p.az - prevAz) > 180) {
-        addGap();
-        prevState = null;
+        if (p.az - prevAz > 180) azOffset -= 360;
+        else azOffset += 360;
       }
 
+      const az = p.az + azOffset;
       const inActive = activeWindow && i >= activeWindow.start && i <= activeWindow.end;
       const state = inActive ? 'vis' : 'dim';
       const hover = makeHover(p);
 
       if (prevState !== null && state !== prevState) {
         if (inActive) {
-          dimAz.push(p.az); dimAlt.push(p.alt); dimHover.push(hover);
+          dimAz.push(az); dimAlt.push(p.alt); dimHover.push(hover);
           dimAz.push(null); dimAlt.push(null); dimHover.push('');
-          visAz.push(p.az); visAlt.push(p.alt); visHover.push(hover);
+          visAz.push(az); visAlt.push(p.alt); visHover.push(hover);
         } else {
-          visAz.push(p.az); visAlt.push(p.alt); visHover.push(hover);
+          visAz.push(az); visAlt.push(p.alt); visHover.push(hover);
           visAz.push(null); visAlt.push(null); visHover.push('');
-          dimAz.push(p.az); dimAlt.push(p.alt); dimHover.push(hover);
+          dimAz.push(az); dimAlt.push(p.alt); dimHover.push(hover);
         }
       } else {
         if (inActive) {
-          visAz.push(p.az); visAlt.push(p.alt); visHover.push(hover);
+          visAz.push(az); visAlt.push(p.alt); visHover.push(hover);
         } else {
-          dimAz.push(p.az); dimAlt.push(p.alt); dimHover.push(hover);
+          dimAz.push(az); dimAlt.push(p.alt); dimHover.push(hover);
         }
       }
 
@@ -473,31 +487,36 @@
     const track = computeTrack(selectedTarget.ra, selectedTarget.dec, tgt);
     if (!track.visAz.length && !track.dimAz.length) return;
 
+    const pVis = wrapAzLines(track.visAz, track.visAlt, track.visHover);
+    const pDim = wrapAzLines(track.dimAz, track.dimAlt, track.dimHover);
+
     const newTraces = [];
     const annotations = [];
 
     newTraces.push({
-      x: track.visAz, y: track.visAlt,
+      x: pVis.az, y: pVis.alt,
       type: 'scatter', mode: 'lines',
       line: {color: 'rgba(255,255,255,0.8)', width: 2},
       name: tgt + ' track',
       showlegend: true,
-      text: track.visHover, hoverinfo: 'text',
+      text: pVis.hover, hoverinfo: 'text',
       _isPath: true
     });
 
     newTraces.push({
-      x: track.dimAz, y: track.dimAlt,
+      x: pDim.az, y: pDim.alt,
       type: 'scatter', mode: 'lines',
       line: {color: 'rgba(255,255,255,0.2)', width: 1.5, dash: 'dot'},
       showlegend: false,
-      text: track.dimHover, hoverinfo: 'text',
+      text: pDim.hover, hoverinfo: 'text',
       _isPath: true
     });
 
     if (track.nowPos) {
+      const nAz = [], nAlt = [];
+      for (const off of [-360, 0, 360]) { nAz.push(track.nowPos.az + off); nAlt.push(track.nowPos.alt); }
       newTraces.push({
-        x: [track.nowPos.az], y: [track.nowPos.alt],
+        x: nAz, y: nAlt,
         type: 'scatter', mode: 'markers',
         marker: {
           size: 10, color: '#fff', symbol: 'circle',
@@ -513,41 +532,49 @@
     }
 
     if (track.transit) {
+      const tAz = [], tAlt = [];
+      for (const off of [-360, 0, 360]) { tAz.push(track.transit.az + off); tAlt.push(track.transit.alt); }
       newTraces.push({
-        x: [track.transit.az], y: [track.transit.alt],
+        x: tAz, y: tAlt,
         type: 'scatter', mode: 'markers',
         marker: {size: 14, color: '#FFD700', symbol: 'star'},
         showlegend: false,
-        hovertext: ['Transit: ' + fmtTime(track.transit.time) + '<br>Alt ' + track.transit.alt.toFixed(1) + '°'],
+        hovertext: 'Transit: ' + fmtTime(track.transit.time) + '<br>Alt ' + track.transit.alt.toFixed(1) + '°',
         hoverinfo: 'text',
         _isPath: true
       });
-      annotations.push({
-        x: track.transit.az, y: track.transit.alt,
-        text: fmtTime(track.transit.time),
-        showarrow: true, arrowhead: 0, arrowcolor: '#FFD700',
-        ax: 0, ay: -25,
-        font: {color: '#FFD700', size: 16},
-        bgcolor: 'rgba(0,0,0,0.6)', borderpad: 3
-      });
+      for (const off of [-360, 0, 360]) {
+        annotations.push({
+          x: track.transit.az + off, y: track.transit.alt,
+          text: fmtTime(track.transit.time),
+          showarrow: true, arrowhead: 0, arrowcolor: '#FFD700',
+          ax: 0, ay: -25,
+          font: {color: '#FFD700', size: 16},
+          bgcolor: 'rgba(0,0,0,0.6)', borderpad: 3
+        });
+      }
     }
 
     if (track.crossings.length) {
       const cAz = [], cAlt = [], cHover = [], cColors = [];
       for (const c of track.crossings) {
         const color = c.type === 'rise' ? '#4ecdc4' : '#ff6b6b';
-        cAz.push(c.az);
-        cAlt.push(c.alt);
-        cColors.push(color);
-        cHover.push((c.type === 'rise' ? 'Rises' : 'Sets') + ': ' + fmtTime(c.time));
-        annotations.push({
-          x: c.az, y: c.alt,
-          text: (c.type === 'rise' ? '▲ ' : '▼ ') + fmtTime(c.time),
-          showarrow: true, arrowhead: 0, arrowcolor: color,
-          ax: 0, ay: -25,
-          font: {color: color, size: 16},
-          bgcolor: 'rgba(0,0,0,0.6)', borderpad: 3
-        });
+        for (const off of [-360, 0, 360]) {
+          cAz.push(c.az + off);
+          cAlt.push(c.alt);
+          cColors.push(color);
+          cHover.push((c.type === 'rise' ? 'Rises' : 'Sets') + ': ' + fmtTime(c.time));
+        }
+        for (const off of [-360, 0, 360]) {
+          annotations.push({
+            x: c.az + off, y: c.alt,
+            text: (c.type === 'rise' ? '▲ ' : '▼ ') + fmtTime(c.time),
+            showarrow: true, arrowhead: 0, arrowcolor: color,
+            ax: 0, ay: -25,
+            font: {color: color, size: 16},
+            bgcolor: 'rgba(0,0,0,0.6)', borderpad: 3
+          });
+        }
       }
       newTraces.push({
         x: cAz, y: cAlt,
@@ -568,7 +595,7 @@
     const h = ALL_HORIZONS[activeHorizonIdx];
     if (h) {
       const azArr = [], altArr = [];
-      for (let a = 0; a <= 360; a++) {
+      for (let a = -360; a <= 720; a++) {
         azArr.push(a);
         altArr.push(mAlt(a));
       }
@@ -586,8 +613,20 @@
 
     document.getElementById('skymap').on('plotly_click', function(data) {
       const pt = data.points[0];
-      if (!pt.customdata) return;
-      const ra = pt.customdata[0], dec = pt.customdata[1], name = pt.customdata[2];
+      let ra, dec, name;
+      if (pt.customdata) {
+        ra = pt.customdata[0]; dec = pt.customdata[1]; name = pt.customdata[2];
+      } else {
+        const trace = document.getElementById('skymap').data[pt.curveNumber];
+        if (trace && trace._targetId) {
+          const tgt = TARGET_LIST.find(t => t.id === trace._targetId);
+          if (!tgt) return;
+          ra = tgt.ra; dec = tgt.dec;
+          name = tgt.id + (tgt.name ? ' (' + tgt.name + ')' : '');
+        } else {
+          return;
+        }
+      }
       if (selectedTarget && selectedTarget.ra === ra && selectedTarget.dec === dec) {
         selectedTarget = null;
       } else {
@@ -645,17 +684,20 @@
 
       const xv = [], yv = [], sz = [], txt = [], cd = [];
       for (const rc of recs) {
-        xv.push(rc.az);
-        yv.push(rc.alt);
-        sz.push(Math.max(8, Math.min(30, 8 + 22 * rc.total_exposure_sec / maxExp)));
-        txt.push(
-          '<b>' + rc.target + '</b><br>' +
+        const s = Math.max(8, Math.min(30, 8 + 22 * rc.total_exposure_sec / maxExp));
+        const t = '<b>' + rc.target + '</b><br>' +
           cardinalDir(rc.az) + ' Az ' + rc.az.toFixed(1) + '°  Alt ' + rc.alt.toFixed(1) + '°<br>' +
           'Frames: ' + rc.num_frames + '<br>' +
           'Exposure: ' + fmtExp(rc.total_exposure_sec) + '<br>' +
-          'Filter: ' + rc.filter_name
-        );
-        cd.push([rc.ra_deg, rc.dec_deg, rc.target]);
+          'Filter: ' + rc.filter_name;
+        const c = [rc.ra_deg, rc.dec_deg, rc.target];
+        for (const off of [-360, 0, 360]) {
+          xv.push(rc.az + off);
+          yv.push(rc.alt);
+          sz.push(s);
+          txt.push(t);
+          cd.push(c);
+        }
       }
       newTraces.push({
         x: xv, y: yv,
@@ -668,14 +710,18 @@
     }
 
     if (sunAA.alt > -2) {
+      const sunY = Math.max(0, sunAA.alt);
+      const sunHover = 'Sun  ' + cardinalDir(sunAA.az) +
+                       ' Az ' + sunAA.az.toFixed(1) + '° Alt ' + sunAA.alt.toFixed(1) + '°';
+      const sAz = [], sAlt = [];
+      for (const off of [-360, 0, 360]) { sAz.push(sunAA.az + off); sAlt.push(sunY); }
       newTraces.push({
-        x: [sunAA.az], y: [Math.max(0, sunAA.alt)],
+        x: sAz, y: sAlt,
         type: 'scatter', mode: 'markers',
         name: 'Sun', showlegend: true,
         marker: { size: 18, color: '#FFD700', symbol: 'circle',
                   line: { width: 2, color: '#FF8C00' } },
-        hovertext: 'Sun  ' + cardinalDir(sunAA.az) +
-                   ' Az ' + sunAA.az.toFixed(1) + '° Alt ' + sunAA.alt.toFixed(1) + '°',
+        hovertext: sunHover,
         hoverinfo: 'text'
       });
     }
@@ -684,36 +730,28 @@
       const tgt = TARGET_LIST[ti];
       const label = tgt.id + (tgt.name ? ' (' + tgt.name + ')' : '');
       const color = TARGET_COLORS[ti % TARGET_COLORS.length];
-      const dimColor = hexToRgba(color, 0.35);
       const track = computeTrack(tgt.ra, tgt.dec, label);
       if (!track.visAz.length && !track.dimAz.length) continue;
       const vis = targetVisibility[tgt.id] === false ? 'legendonly' : true;
+      const wVis = wrapAzLines(track.visAz, track.visAlt, track.visHover);
 
       newTraces.push({
-        x: track.visAz, y: track.visAlt,
+        x: wVis.az, y: wVis.alt,
         type: 'scatter', mode: 'lines',
         line: {color: color, width: 2.5},
         name: label,
         legendgroup: tgt.id,
         showlegend: true,
         visible: vis,
-        text: track.visHover, hoverinfo: 'text',
+        text: wVis.hover, hoverinfo: 'text',
         _targetId: tgt.id
       });
 
-      newTraces.push({
-        x: track.dimAz, y: track.dimAlt,
-        type: 'scatter', mode: 'lines',
-        line: {color: dimColor, width: 1.5},
-        legendgroup: tgt.id,
-        showlegend: false,
-        visible: vis,
-        text: track.dimHover, hoverinfo: 'text',
-      });
-
       if (track.nowPos) {
+        const nAz = [], nAlt = [];
+        for (const off of [-360, 0, 360]) { nAz.push(track.nowPos.az + off); nAlt.push(track.nowPos.alt); }
         newTraces.push({
-          x: [track.nowPos.az], y: [track.nowPos.alt],
+          x: nAz, y: nAlt,
           type: 'scatter', mode: 'markers',
           marker: {
             size: 10, color: color, symbol: 'circle',
