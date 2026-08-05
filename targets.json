@@ -63,12 +63,6 @@
       "dec": 22.7212
     },
     {
-      "id": "Albireo",
-      "name": "Albireo",
-      "ra": 292.6803,
-      "dec": 27.9597
-    },
-    {
       "id": "IC1848",
       "name": "Soul Nebula",
       "ra": 42.855,
@@ -140,6 +134,12 @@
       "name": "Jellyfish Nebula",
       "ra": 94.25,
       "dec": 22.57
+    },
+    {
+      "id": "IC63",
+      "name": "Ghost of Cassiopeia",
+      "ra": 14.7557,
+      "dec": 60.8883
     }
   ]
 }
