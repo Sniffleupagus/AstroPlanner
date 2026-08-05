@@ -90,7 +90,7 @@
   let activeHorizonIdx = -1;
   let NUM_BASE = 0, NUM_BASE_HZ = 0;
   let currentView = 'sky';
-  let selectedTarget = null;
+  let selectedTargets = [];
   let refreshTimer = null;
   let TARGET_LIST = [];
   let targetVisibility = {};
@@ -481,109 +481,111 @@
     if (toRemove.length) Plotly.deleteTraces(div, toRemove);
     Plotly.relayout(div, {annotations: []});
 
-    if (!selectedTarget) return;
-
-    const tgt = selectedTarget.name;
-    const track = computeTrack(selectedTarget.ra, selectedTarget.dec, tgt);
-    if (!track.visAz.length && !track.dimAz.length) return;
-
-    const pVis = wrapAzLines(track.visAz, track.visAlt, track.visHover);
-    const pDim = wrapAzLines(track.dimAz, track.dimAlt, track.dimHover);
+    if (!selectedTargets.length) return;
 
     const newTraces = [];
     const annotations = [];
 
-    newTraces.push({
-      x: pVis.az, y: pVis.alt,
-      type: 'scatter', mode: 'lines',
-      line: {color: 'rgba(255,255,255,0.8)', width: 2},
-      name: tgt + ' track',
-      showlegend: true,
-      text: pVis.hover, hoverinfo: 'text',
-      _isPath: true
-    });
+    for (const sel of selectedTargets) {
+      const tgt = sel.name;
+      const track = computeTrack(sel.ra, sel.dec, tgt);
+      if (!track.visAz.length && !track.dimAz.length) continue;
 
-    newTraces.push({
-      x: pDim.az, y: pDim.alt,
-      type: 'scatter', mode: 'lines',
-      line: {color: 'rgba(255,255,255,0.2)', width: 1.5, dash: 'dot'},
-      showlegend: false,
-      text: pDim.hover, hoverinfo: 'text',
-      _isPath: true
-    });
+      const pVis = wrapAzLines(track.visAz, track.visAlt, track.visHover);
+      const pDim = wrapAzLines(track.dimAz, track.dimAlt, track.dimHover);
 
-    if (track.nowPos) {
-      const nAz = [], nAlt = [];
-      for (const off of [-360, 0, 360]) { nAz.push(track.nowPos.az + off); nAlt.push(track.nowPos.alt); }
       newTraces.push({
-        x: nAz, y: nAlt,
-        type: 'scatter', mode: 'markers',
-        marker: {
-          size: 10, color: '#fff', symbol: 'circle',
-          line: {width: 2, color: '#fff'}
-        },
-        showlegend: false,
-        hovertext: tgt + ' (NOW)<br>' +
-          cardinalDir(track.nowPos.az) + ' Az ' + track.nowPos.az.toFixed(1) +
-          '° Alt ' + track.nowPos.alt.toFixed(1) + '°',
-        hoverinfo: 'text',
+        x: pVis.az, y: pVis.alt,
+        type: 'scatter', mode: 'lines',
+        line: {color: 'rgba(255,255,255,0.8)', width: 2},
+        name: tgt + ' track',
+        showlegend: true,
+        text: pVis.hover, hoverinfo: 'text',
         _isPath: true
       });
-    }
 
-    if (track.transit) {
-      const tAz = [], tAlt = [];
-      for (const off of [-360, 0, 360]) { tAz.push(track.transit.az + off); tAlt.push(track.transit.alt); }
       newTraces.push({
-        x: tAz, y: tAlt,
-        type: 'scatter', mode: 'markers',
-        marker: {size: 14, color: '#FFD700', symbol: 'star'},
+        x: pDim.az, y: pDim.alt,
+        type: 'scatter', mode: 'lines',
+        line: {color: 'rgba(255,255,255,0.2)', width: 1.5, dash: 'dot'},
         showlegend: false,
-        hovertext: 'Transit: ' + fmtTime(track.transit.time) + '<br>Alt ' + track.transit.alt.toFixed(1) + '°',
-        hoverinfo: 'text',
+        text: pDim.hover, hoverinfo: 'text',
         _isPath: true
       });
-      for (const off of [-360, 0, 360]) {
-        annotations.push({
-          x: track.transit.az + off, y: track.transit.alt,
-          text: fmtTime(track.transit.time),
-          showarrow: true, arrowhead: 0, arrowcolor: '#FFD700',
-          ax: 0, ay: -25,
-          font: {color: '#FFD700', size: 16},
-          bgcolor: 'rgba(0,0,0,0.6)', borderpad: 3
+
+      if (track.nowPos) {
+        const nAz = [], nAlt = [];
+        for (const off of [-360, 0, 360]) { nAz.push(track.nowPos.az + off); nAlt.push(track.nowPos.alt); }
+        newTraces.push({
+          x: nAz, y: nAlt,
+          type: 'scatter', mode: 'markers',
+          marker: {
+            size: 10, color: '#fff', symbol: 'circle',
+            line: {width: 2, color: '#fff'}
+          },
+          showlegend: false,
+          hovertext: tgt + ' (NOW)<br>' +
+            cardinalDir(track.nowPos.az) + ' Az ' + track.nowPos.az.toFixed(1) +
+            '° Alt ' + track.nowPos.alt.toFixed(1) + '°',
+          hoverinfo: 'text',
+          _isPath: true
         });
       }
-    }
 
-    if (track.crossings.length) {
-      const cAz = [], cAlt = [], cHover = [], cColors = [];
-      for (const c of track.crossings) {
-        const color = c.type === 'rise' ? '#4ecdc4' : '#ff6b6b';
-        for (const off of [-360, 0, 360]) {
-          cAz.push(c.az + off);
-          cAlt.push(c.alt);
-          cColors.push(color);
-          cHover.push((c.type === 'rise' ? 'Rises' : 'Sets') + ': ' + fmtTime(c.time));
-        }
+      if (track.transit) {
+        const tAz = [], tAlt = [];
+        for (const off of [-360, 0, 360]) { tAz.push(track.transit.az + off); tAlt.push(track.transit.alt); }
+        newTraces.push({
+          x: tAz, y: tAlt,
+          type: 'scatter', mode: 'markers',
+          marker: {size: 14, color: '#FFD700', symbol: 'star'},
+          showlegend: false,
+          hovertext: 'Transit: ' + fmtTime(track.transit.time) + '<br>Alt ' + track.transit.alt.toFixed(1) + '°',
+          hoverinfo: 'text',
+          _isPath: true
+        });
         for (const off of [-360, 0, 360]) {
           annotations.push({
-            x: c.az + off, y: c.alt,
-            text: (c.type === 'rise' ? '▲ ' : '▼ ') + fmtTime(c.time),
-            showarrow: true, arrowhead: 0, arrowcolor: color,
+            x: track.transit.az + off, y: track.transit.alt,
+            text: fmtTime(track.transit.time),
+            showarrow: true, arrowhead: 0, arrowcolor: '#FFD700',
             ax: 0, ay: -25,
-            font: {color: color, size: 16},
+            font: {color: '#FFD700', size: 16},
             bgcolor: 'rgba(0,0,0,0.6)', borderpad: 3
           });
         }
       }
-      newTraces.push({
-        x: cAz, y: cAlt,
-        type: 'scatter', mode: 'markers',
-        marker: {size: 10, color: cColors, symbol: 'diamond'},
-        showlegend: false,
-        hovertext: cHover, hoverinfo: 'text',
-        _isPath: true
-      });
+
+      if (track.crossings.length) {
+        const cAz = [], cAlt = [], cHover = [], cColors = [];
+        for (const c of track.crossings) {
+          const color = c.type === 'rise' ? '#4ecdc4' : '#ff6b6b';
+          for (const off of [-360, 0, 360]) {
+            cAz.push(c.az + off);
+            cAlt.push(c.alt);
+            cColors.push(color);
+            cHover.push((c.type === 'rise' ? 'Rises' : 'Sets') + ': ' + fmtTime(c.time));
+          }
+          for (const off of [-360, 0, 360]) {
+            annotations.push({
+              x: c.az + off, y: c.alt,
+              text: (c.type === 'rise' ? '▲ ' : '▼ ') + fmtTime(c.time),
+              showarrow: true, arrowhead: 0, arrowcolor: color,
+              ax: 0, ay: -25,
+              font: {color: color, size: 16},
+              bgcolor: 'rgba(0,0,0,0.6)', borderpad: 3
+            });
+          }
+        }
+        newTraces.push({
+          x: cAz, y: cAlt,
+          type: 'scatter', mode: 'markers',
+          marker: {size: 10, color: cColors, symbol: 'diamond'},
+          showlegend: false,
+          hovertext: cHover, hoverinfo: 'text',
+          _isPath: true
+        });
+      }
     }
 
     if (newTraces.length) Plotly.addTraces(div, newTraces);
@@ -627,10 +629,14 @@
           return;
         }
       }
-      if (selectedTarget && selectedTarget.ra === ra && selectedTarget.dec === dec) {
-        selectedTarget = null;
+      const entry = {ra: ra, dec: dec, name: name};
+      const idx = selectedTargets.findIndex(s => s.ra === ra && s.dec === dec);
+      if (data.event && data.event.shiftKey) {
+        if (idx >= 0) selectedTargets.splice(idx, 1);
+        else selectedTargets.push(entry);
       } else {
-        selectedTarget = {ra: ra, dec: dec, name: name};
+        if (idx >= 0 && selectedTargets.length === 1) selectedTargets = [];
+        else selectedTargets = [entry];
       }
       drawPath();
     });
