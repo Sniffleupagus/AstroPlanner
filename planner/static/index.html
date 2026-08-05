@@ -98,6 +98,28 @@
   // ── Shared utilities ──────────────────────────────────────────────────────
   function cl(v) { return v < -1 ? -1 : v > 1 ? 1 : v; }
 
+  // Color helpers: dim a hex color by reducing alpha
+  function hexToRgb(hex) {
+    hex = hex.replace('#', '');
+    if (hex.length === 3) hex = hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2];
+    const n = parseInt(hex, 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  function rgbToHex(r, g, b) {
+    return '#' + ((1 << 24) + (Math.round(r) << 16) + (Math.round(g) << 8) + Math.round(b)).toString(16).slice(1);
+  }
+
+  function rgbaDim(hex, factor) {
+    const [r, g, b] = hexToRgb(hex);
+    return 'rgba(' + r + ',' + g + ',' + b + ',' + factor + ')';
+  }
+
+  function rgbToHex2(hex) {
+    // Return hex color as-is (helper if passed already hex)
+    return hex.startsWith('#') ? hex : hex;
+  }
+
   function sunPos(dt) {
     const J = dt.getTime()/864e5 + 2440587.5, n = J - 2451545;
     const L = ((280.46 + .9856474*n) % 360 + 360) % 360;
@@ -330,6 +352,9 @@
   }
 
   // ── Horizon view ──────────────────────────────────────────────────────────
+  // Dimming factor for portions of the path below obstacles
+  const PATH_DIM_FACTOR = 0.35;
+
   function computeTrack(ra, dec, name) {
     const now = new Date();
     const pts = [];
@@ -338,30 +363,40 @@
       const L = lst(dt);
       const aa = rd2aa(ra, dec, L);
       const hAlt = mAlt(aa.az);
-      pts.push({az: aa.az, alt: aa.alt, time: dt, hAlt: hAlt});
+      const aboveObstacle = aa.alt > 0 && aa.alt >= hAlt;
+      pts.push({az: aa.az, alt: aa.alt, time: dt, hAlt: hAlt, aboveObstacle: aboveObstacle});
     }
 
-    const pathAz = [], pathAlt = [], pathHover = [];
+    // Find current index (closest to now)
+    let nowIdx = 0, nowDist = Infinity;
+    for (let i = 0; i < pts.length; i++) {
+      const d = Math.abs(pts[i].time.getTime() - now.getTime());
+      if (d < nowDist) { nowDist = d; nowIdx = i; }
+    }
+
+    const pathAz = [], pathAlt = [], pathHover = [], pathVis = [];
     let prevAz = null;
     for (let i = 0; i < pts.length; i++) {
       const p = pts[i];
       if (p.alt <= 0) {
         if (pathAz.length && pathAz[pathAz.length - 1] !== null) {
-          pathAz.push(null); pathAlt.push(null); pathHover.push('');
+          pathAz.push(null); pathAlt.push(null); pathHover.push(''); pathVis.push(null);
         }
         prevAz = null;
         continue;
       }
       if (prevAz !== null && Math.abs(p.az - prevAz) > 180) {
-        pathAz.push(null); pathAlt.push(null); pathHover.push('');
+        pathAz.push(null); pathAlt.push(null); pathHover.push(''); pathVis.push(null);
       }
       prevAz = p.az;
       pathAz.push(p.az);
       pathAlt.push(p.alt);
+      pathVis.push(p.aboveObstacle);
       pathHover.push(
         name + '<br>' +
         fmtTime(p.time) + '<br>' +
-        cardinalDir(p.az) + ' Az ' + p.az.toFixed(1) + '° Alt ' + p.alt.toFixed(1) + '°'
+        cardinalDir(p.az) + ' Az ' + p.az.toFixed(1) + '° Alt ' + p.alt.toFixed(1) + '°<br>' +
+        (p.aboveObstacle ? 'Visible' : 'Behind obstacle')
       );
     }
 
@@ -372,12 +407,13 @@
       }
     }
 
+    // Find visibility crossings (rise/set over obstacles)
     const crossings = [];
     for (let i = 1; i < pts.length; i++) {
       const prev = pts[i - 1], curr = pts[i];
       if (prev.alt <= 0 && curr.alt <= 0) continue;
-      const prevVis = prev.alt > 0 && prev.alt >= prev.hAlt;
-      const currVis = curr.alt > 0 && curr.alt >= curr.hAlt;
+      const prevVis = prev.aboveObstacle;
+      const currVis = curr.aboveObstacle;
       if (prevVis !== currVis) {
         const cp = currVis ? curr : prev;
         crossings.push({
@@ -388,7 +424,33 @@
       }
     }
 
-    return {pathAz, pathAlt, pathHover, transit, crossings};
+    // Build segments with visibility info for rendering
+    const segments = [];
+    let curSeg = null;
+    for (let i = 0; i < pathAz.length; i++) {
+      if (pathAz[i] === null) {
+        if (curSeg) { segments.push(curSeg); curSeg = null; }
+        continue;
+      }
+      const vis = pathVis[i];
+      if (!curSeg) {
+        curSeg = {vis: vis, az: [], alt: [], hover: [], nowIdx: -1, nowAz: 0, nowAlt: 0};
+      } else if (curSeg.vis !== vis) {
+        segments.push(curSeg);
+        curSeg = {vis: vis, az: [], alt: [], hover: [], nowIdx: -1, nowAz: 0, nowAlt: 0};
+      }
+      curSeg.az.push(pathAz[i]);
+      curSeg.alt.push(pathAlt[i]);
+      curSeg.hover.push(pathHover[i]);
+      if (i === nowIdx) {
+        curSeg.nowIdx = curSeg.az.length - 1;
+        curSeg.nowAz = pathAz[i];
+        curSeg.nowAlt = pathAlt[i];
+      }
+    }
+    if (curSeg) segments.push(curSeg);
+
+    return {segments, nowIdx, nowAz: pts[nowIdx].az, nowAlt: pts[nowIdx].alt, transit, crossings};
   }
 
   function drawPath() {
@@ -404,21 +466,63 @@
     if (!selectedTarget) return;
 
     const tgt = selectedTarget.name;
+    const color = selectedTarget.color || '#ffffff';
     const track = computeTrack(selectedTarget.ra, selectedTarget.dec, tgt);
-    if (!track.pathAz.length) return;
+    if (!track.segments.length) return;
 
     const newTraces = [];
     const annotations = [];
 
-    newTraces.push({
-      x: track.pathAz, y: track.pathAlt,
-      type: 'scatter', mode: 'lines',
-      line: {color: 'rgba(255,255,255,0.4)', width: 1.5, dash: 'dot'},
-      name: tgt + ' track',
-      showlegend: true,
-      text: track.pathHover, hoverinfo: 'text',
-      _isPath: true
-    });
+    // Draw visible segments (full saturation) and hidden segments (dimmed)
+    for (const seg of track.segments) {
+      if (seg.vis) {
+        // Visible above obstacles: full saturation
+        newTraces.push({
+          x: seg.az, y: seg.alt,
+          type: 'scatter', mode: 'lines',
+          line: {color: color, width: 2.5},
+          name: tgt + ' track (visible)',
+          showlegend: true,
+          text: seg.hover, hoverinfo: 'text',
+          _isPath: true,
+          _isVisible: true
+        });
+      } else {
+        // Hidden behind obstacle: dimmed
+        const dimColor = rgbaDim(color, PATH_DIM_FACTOR);
+        newTraces.push({
+          x: seg.az, y: seg.alt,
+          type: 'scatter', mode: 'lines',
+          line: {color: dimColor, width: 2},
+          name: tgt + ' track (hidden)',
+          showlegend: false,
+          text: seg.hover, hoverinfo: 'text',
+          _isPath: true,
+          _isVisible: false
+        });
+      }
+    }
+
+    // NOW marker showing current position
+    if (track.nowIdx >= 0) {
+      newTraces.push({
+        x: [track.nowAz], y: [track.nowAlt],
+        type: 'scatter', mode: 'markers+text',
+        marker: {
+          size: 16, color: '#ffffff', symbol: 'circle',
+          line: {width: 3, color: color},
+          opacity: 1
+        },
+        text: ['NOW'],
+        textposition: 'top center',
+        textfont: {size: 13, color: color, weight: 'bold'},
+        hovertext: ['Current: ' +
+          cardinalDir(track.nowAz) + ' Az ' + track.nowAz.toFixed(1) + '° Alt ' + track.nowAlt.toFixed(1) + '°'],
+        hoverinfo: 'text',
+        showlegend: false,
+        _isPath: true
+      });
+    }
 
     if (track.transit) {
       newTraces.push({
@@ -443,17 +547,17 @@
     if (track.crossings.length) {
       const cAz = [], cAlt = [], cHover = [], cColors = [];
       for (const c of track.crossings) {
-        const color = c.type === 'rise' ? '#4ecdc4' : '#ff6b6b';
+        const cColor = c.type === 'rise' ? '#4ecdc4' : '#ff6b6b';
         cAz.push(c.az);
         cAlt.push(c.alt);
-        cColors.push(color);
+        cColors.push(cColor);
         cHover.push((c.type === 'rise' ? 'Rises' : 'Sets') + ': ' + fmtTime(c.time));
         annotations.push({
           x: c.az, y: c.alt,
           text: (c.type === 'rise' ? '▲ ' : '▼ ') + fmtTime(c.time),
-          showarrow: true, arrowhead: 0, arrowcolor: color,
+          showarrow: true, arrowhead: 0, arrowcolor: cColor,
           ax: 0, ay: -25,
-          font: {color: color, size: 16},
+          font: {color: cColor, size: 16},
           bgcolor: 'rgba(0,0,0,0.6)', borderpad: 3
         });
       }
@@ -466,6 +570,20 @@
         _isPath: true
       });
     }
+
+    // Legend for visibility key
+    annotations.push({
+      xref: 'paper', yref: 'paper',
+      x: 0.98, y: 0.98, xanchor: 'right', yanchor: 'top',
+      text: '<b>Visibility key:</b><br>' +
+            '<span style="color:' + color + ';font-size:16px">━━</span> Visible above obstacles<br>' +
+            '<span style="color:' + rgbaDim(color, PATH_DIM_FACTOR) + ';font-size:16px">━━</span> Behind obstacles<br>' +
+            '<span style="color:#fff">●</span> Current position<br>' +
+            '<span style="color:#FFD700">★</span> Transit peak',
+      showarrow: false,
+      font: {size: 13, color: '#fff'},
+      bgcolor: 'rgba(0,0,0,0.7)', bordercolor: 'rgba(255,255,255,0.2)', borderwidth: 1, borderpad: 8
+    });
 
     if (newTraces.length) Plotly.addTraces(div, newTraces);
     if (annotations.length) Plotly.relayout(div, {annotations: annotations});
@@ -496,10 +614,11 @@
       const pt = data.points[0];
       if (!pt.customdata) return;
       const ra = pt.customdata[0], dec = pt.customdata[1], name = pt.customdata[2];
+      const color = pt.marker ? pt.marker.color : null;
       if (selectedTarget && selectedTarget.ra === ra && selectedTarget.dec === dec) {
         selectedTarget = null;
       } else {
-        selectedTarget = {ra: ra, dec: dec, name: name};
+        selectedTarget = {ra: ra, dec: dec, name: name, color: color};
       }
       drawPath();
     });
@@ -593,18 +712,33 @@
       const label = tgt.id + (tgt.name ? ' (' + tgt.name + ')' : '');
       const color = TARGET_COLORS[ti % TARGET_COLORS.length];
       const track = computeTrack(tgt.ra, tgt.dec, label);
-      if (!track.pathAz.length) continue;
+      if (!track.segments.length) continue;
       const vis = targetVisibility[tgt.id] === false ? 'legendonly' : true;
-      newTraces.push({
-        x: track.pathAz, y: track.pathAlt,
-        type: 'scatter', mode: 'lines',
-        line: {color: color, width: 2},
-        name: label,
-        showlegend: true,
-        visible: vis,
-        text: track.pathHover, hoverinfo: 'text',
-        _targetId: tgt.id
-      });
+      for (const seg of track.segments) {
+        if (seg.vis) {
+          newTraces.push({
+            x: seg.az, y: seg.alt,
+            type: 'scatter', mode: 'lines',
+            line: {color: color, width: 2.5},
+            name: label,
+            showlegend: true,
+            visible: vis,
+            text: seg.hover, hoverinfo: 'text',
+            _targetId: tgt.id
+          });
+        } else {
+          newTraces.push({
+            x: seg.az, y: seg.alt,
+            type: 'scatter', mode: 'lines',
+            line: {color: rgbaDim(color, PATH_DIM_FACTOR), width: 2},
+            name: label,
+            showlegend: false,
+            visible: vis,
+            text: seg.hover, hoverinfo: 'text',
+            _targetId: tgt.id
+          });
+        }
+      }
     }
 
     if (newTraces.length) Plotly.addTraces(div, newTraces);
