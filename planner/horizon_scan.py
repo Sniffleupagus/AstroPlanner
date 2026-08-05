@@ -28,7 +28,7 @@ SETTLE_THRESHOLD_ALT = 0.5  # degrees
 SETTLE_THRESHOLD_AZ = 4.2   # degrees — looser for sidereal tracking drift
 SLEW_POLL_INTERVAL = 4.0
 SLEW_STALL_TIMEOUT = 20.0  # give up only if no progress for this long
-SUN_AVOIDANCE_DEG = 60.0   # minimum angular distance from the sun
+SUN_AVOIDANCE_DEG = 10.0   # minimum angular distance from the sun
 
 
 def _compass(az_deg):
@@ -263,12 +263,13 @@ class FrameStream:
         verdict = "SKY" if result.get("is_sky") else "OBSTRUCTION"
         blue = result.get("blue_ratio")
         var = result.get("variance")
+        sky_pix = result.get("sky_pixel_frac")
         lines = [
             f"Alt {alt:.0f}  Az {az:.0f} ({_compass(az)})",
             verdict,
         ]
         if blue is not None:
-            lines.append(f"blue={blue:.3f} var={var:.4f}")
+            lines.append(f"blue={blue:.3f} sky_pix={sky_pix:.1%} var={var:.4f}")
 
         y = int(h * 0.45)
         for line in lines:
@@ -480,9 +481,10 @@ def _log_classify(result, alt, az, context=""):
     ctx = f" {context}" if context else ""
     blue = result.get("blue_ratio")
     var = result.get("variance")
+    sky_pix = result.get("sky_pixel_frac")
     if blue is not None:
         print(f"        Frame{ctx} -> {verdict}  "
-              f"mean={bright:.2f}  blue={blue:.3f}  var={var:.4f}")
+              f"mean={bright:.2f}  blue={blue:.3f}  sky_pix={sky_pix:.1%}  var={var:.4f}")
     else:
         bright_frac = result.get("bright_fraction", 0)
         print(f"        Frame{ctx} -> {verdict}  "
